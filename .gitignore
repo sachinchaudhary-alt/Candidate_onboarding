@@ -1,0 +1,15 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.claude/
+scripts/.tmp
+_flow_entry.jsx
+_smoke_entry.jsx
+_h.jsx
+_*.mjs
+*.output
+npm-debug.log*

@@ -1,0 +1,339 @@
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import Icon from '../../components/common/Icon.jsx';
+import TAHeader from '../../components/ta/TAHeader.jsx';
+import Card from '../../components/ta/Card.jsx';
+import KpiCard from '../../components/ta/KpiCard.jsx';
+import DonutChart from '../../components/ta/DonutChart.jsx';
+import FunnelChart from '../../components/ta/FunnelChart.jsx';
+import { useApp } from '../../context/AppContext.jsx';
+import {
+  APP_STATUS,
+  ROUND_STATUS,
+  OFFER_STATUS,
+  stageIndexForStatus,
+} from '../../constants/statuses.js';
+import { countInWindow, trendPercent, groupCounts, noticePeriodDays } from '../../utils/metrics.js';
+import { timeAgo } from '../../utils/format.js';
+import { mergeConsecutive } from '../../utils/activity.js';
+
+/* Activity entries that come from the candidate's own actions — these are the
+   "something changed, take a look" updates the TA shouldn't have to hunt for. */
+const CANDIDATE_UPDATE_TITLES = new Set([
+  'Application Submitted', 'Application Resubmitted', 'Document Uploaded',
+  'Document Not Provided', 'Onboarding Forms Submitted', 'Offer Accepted',
+]);
+const UPDATE_ICON = {
+  'Application Submitted': 'FileText',
+  'Application Resubmitted': 'RotateCcw',
+  'Document Uploaded': 'Upload',
+  'Document Not Provided': 'MessageSquare',
+  'Onboarding Forms Submitted': 'ClipboardList',
+  'Offer Accepted': 'CheckCircle2',
+};
+
+/* The five pipeline stages shown in the funnel + list, with the index in
+   PIPELINE_STAGES a candidate must have reached to be counted. */
+const STAGES = [
+  { label: 'Applied', icon: 'FileText', tone: 'blue', reach: 0, color: '#4b7bf7', key: 'applied' },
+  { label: 'Screening', icon: 'Eye', tone: 'violet', reach: 1, color: '#8b7ff0', key: 'screening' },
+  { label: 'Interview', icon: 'CalendarDays', tone: 'amber', reach: 2, color: '#f6a04a', key: 'interview' },
+  { label: 'Offer', icon: 'FileCheck', tone: 'green', reach: 4, color: '#46c98a', key: 'offer' },
+  { label: 'Hired', icon: 'UserRoundCheck', tone: 'green', reach: 5, color: '#a5ddc2', key: 'hired' },
+];
+
+const SOURCE_COLOR = {
+  Direct: 'var(--viz-blue)',
+  'Job Board': 'var(--viz-orange)',
+  Referral: 'var(--viz-aqua)',
+  Social: 'var(--viz-magenta)',
+};
+
+const PERIODS = [
+  { value: 'all', label: 'All time', days: null },
+  { value: '90', label: 'Last 90 days', days: 90 },
+  { value: '30', label: 'Last 30 days', days: 30 },
+];
+
+/* Notice-period buckets for the donut chart, shortest (can join soonest) first.
+   `color` reuses the same tag colours as the rest of the app. */
+const NOTICE_BUCKETS = [
+  { label: 'Immediate', color: 'var(--tag-green-fg)' },
+  { label: '15 days', color: 'var(--tag-teal-fg)' },
+  { label: '30 days', color: 'var(--tag-blue-fg)' },
+  { label: '45 days', color: 'var(--tag-violet-fg)' },
+  { label: '60 days', color: 'var(--tag-amber-fg)' },
+  { label: '90 days', color: 'var(--tag-red-fg)' },
+];
+
+// Candidates whose notice period is this many days or fewer count as "ending soon".
+const SOON_THRESHOLD_DAYS = 15;
+
+export default function TADashboard() {
+  const navigate = useNavigate();
+  const { data, jobs, taIdentity, isTAHead } = useApp();
+  const [period, setPeriod] = useState('all');
+  const [updatesOpen, setUpdatesOpen] = useState(false);
+
+  // KPI row: fixed-width tiles, scrolls sideways instead of shrinking when
+  // there are more than fit — the arrows only show up when there's somewhere to go.
+  const kpiRowRef = useRef(null);
+  const [kpiScroll, setKpiScroll] = useState({ left: false, right: false });
+  const checkKpiScroll = () => {
+    const el = kpiRowRef.current;
+    if (!el) return;
+    setKpiScroll({ left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 });
+  };
+  const scrollKpis = (dir) => {
+    const el = kpiRowRef.current;
+    if (!el) return;
+    const tile = el.firstElementChild;
+    const step = tile ? tile.getBoundingClientRect().width + 14 : el.clientWidth / 4;
+    el.scrollBy({ left: dir * step, behavior: 'smooth' });
+  };
+
+  // ----- DATA -----
+  const apps = data.applications || [];
+  const interviews = data.interviews || [];
+  const offers = data.offers || [];
+  const activities = data.activities || [];
+
+  // Candidate-driven updates, newest first, resolved to a clickable candidate.
+  const appById = new Map(apps.map((a) => [a.id, a]));
+  const candidateUpdates = mergeConsecutive(
+    activities.filter((a) => CANDIDATE_UPDATE_TITLES.has(a.title) && appById.has(a.applicationId)),
+    ['Document Uploaded', 'Document Not Provided'],
+  )
+    .slice(0, 6)
+    .map((a) => {
+      const app = appById.get(a.applicationId);
+      return { ...a, candidateId: app.candidateId, who: `${app.personal.firstName} ${app.personal.lastName}` };
+    });
+
+  // ----- FILTERING -----
+  // Applications inside the selected time period (used by the pipeline + source chart).
+  const periodDays = PERIODS.find((p) => p.value === period)?.days;
+  const periodApps = periodDays
+    ? apps.filter((a) => new Date(a.submittedAt).getTime() >= Date.now() - periodDays * 86400000)
+    : apps;
+
+  // Applications still active in the pipeline (not rejected).
+  const activeApps = periodApps.filter((a) => a.status !== APP_STATUS.REJECTED);
+
+  // Active pipeline, all-time (not rejected, not already hired) — notice period only
+  // matters for candidates we're still trying to bring onboard.
+  const activeForNotice = apps.filter((a) => a.status !== APP_STATUS.REJECTED && a.status !== APP_STATUS.EMPLOYEE);
+
+  // ----- CALCULATIONS -----
+  const extendedOffers = offers.filter((o) =>
+    [OFFER_STATUS.ISSUED, OFFER_STATUS.ACCEPTED, OFFER_STATUS.DECLINED].includes(o.status)
+  );
+  const jobsWithApplicants = jobs.filter((j) => apps.some((a) => a.jobId === j.id)).length;
+  const interviewsDone = interviews.filter((i) => i.status !== ROUND_STATUS.SCHEDULED).length;
+  const offersAccepted = offers.filter((o) => o.status === OFFER_STATUS.ACCEPTED).length;
+
+  const scheduledInterviews = interviews.filter((i) => i.status === ROUND_STATUS.SCHEDULED).length;
+  const kpis = [
+    {
+      icon: 'Users', label: 'Total Candidates', accent: 'blue', value: apps.length,
+      meter: { value: activeForNotice.length, max: Math.max(1, apps.length) },
+      trend: trendPercent(countInWindow(apps, 'submittedAt', 0), countInWindow(apps, 'submittedAt', 1)),
+      note: `${activeForNotice.length} still active in the pipeline`,
+      onClick: () => navigate('/ta/candidates'),
+    },
+    {
+      icon: 'Briefcase', label: 'Open Jobs', accent: 'violet', value: jobs.length,
+      meter: { value: jobsWithApplicants, max: Math.max(1, jobs.length) },
+      note: `${jobsWithApplicants} of ${jobs.length} receiving applicants`,
+      onClick: () => navigate('/ta/jobs'),
+    },
+    {
+      icon: 'CalendarDays', label: 'Interviews Scheduled', accent: 'amber', value: scheduledInterviews,
+      meter: { value: interviewsDone, max: Math.max(1, interviewsDone + scheduledInterviews) },
+      trend: trendPercent(countInWindow(interviews, 'date', 0), countInWindow(interviews, 'date', 1)),
+      note: `${interviewsDone} completed so far`,
+      onClick: () => navigate('/ta/candidates?stage=interview'),
+    },
+    {
+      icon: 'FileCheck', label: 'Offers Extended', accent: 'green', value: extendedOffers.length,
+      meter: { value: offersAccepted, max: Math.max(1, extendedOffers.length) },
+      trend: trendPercent(countInWindow(extendedOffers, 'createdAt', 0), countInWindow(extendedOffers, 'createdAt', 1)),
+      note: `${offersAccepted} accepted`,
+      onClick: () => navigate('/ta/candidates?stage=offer'),
+    },
+  ];
+
+  // Self-sourced leads waiting to be handed to a TA — only the Head triages these.
+  if (isTAHead) {
+    const unassignedCount = apps.filter((a) => !a.assignedTo).length;
+    kpis.push({
+      icon: 'UserRoundX', label: 'Unassigned', accent: 'red', value: unassignedCount,
+      note: `${unassignedCount} self-sourced application${unassignedCount === 1 ? '' : 's'} need a TA`,
+      onClick: () => navigate('/ta/candidates?assignedTo=unassigned'),
+    });
+  }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { checkKpiScroll(); }, [kpis.length]);
+
+  const stageRows = STAGES.map((s) => ({
+    ...s,
+    value: activeApps.filter((a) => stageIndexForStatus(a.status) >= s.reach).length,
+  }));
+  const busiest = stageRows.reduce((top, s) => (s.value > top.value ? s : top), stageRows[0]);
+
+  // Candidates who can join within SOON_THRESHOLD_DAYS — the ones a TA should reach out to now.
+  const soonCount = activeForNotice.filter((a) => {
+    const days = noticePeriodDays(a.professional?.noticePeriod);
+    return days !== null && days <= SOON_THRESHOLD_DAYS;
+  }).length;
+
+  // ----- CHART DATA -----
+  const sourceCounts = groupCounts(periodApps, (a) => a.source || 'Direct');
+  const sourceSlices = sourceCounts.map((c) => ({ label: c.key, value: c.count, color: SOURCE_COLOR[c.key] || 'var(--viz-magenta)' }));
+
+  // How many active candidates fall into each notice-period bucket — feeds the donut chart.
+  const noticeCounts = groupCounts(activeForNotice, (a) => a.professional?.noticePeriod);
+  const noticeCountByLabel = new Map(noticeCounts.map((c) => [c.key, c.count]));
+  const noticeSlices = NOTICE_BUCKETS.map((b) => ({ label: b.label, color: b.color, value: noticeCountByLabel.get(b.label) || 0 }));
+
+  // ----- JSX -----
+  const periodSelect = (
+    <select className="ta-period" value={period} onChange={(e) => setPeriod(e.target.value)} aria-label="Time period">
+      {PERIODS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+    </select>
+  );
+
+  return (
+    <>
+      <TAHeader title="Dashboard" subtitle={`Welcome back, ${taIdentity}`} />
+
+      <div className="ta-kpi-wrap">
+        {kpiScroll.left && (
+          <button type="button" className="ta-kpi-nav ta-kpi-nav--left" aria-label="Scroll left" onClick={() => scrollKpis(-1)}>
+            <Icon name="ChevronLeft" size={16} />
+          </button>
+        )}
+        <div className="ta-kpi-row" ref={kpiRowRef} onScroll={checkKpiScroll}>
+          {kpis.map((k) => <KpiCard key={k.label} {...k} />)}
+        </div>
+        {kpiScroll.right && (
+          <button type="button" className="ta-kpi-nav ta-kpi-nav--right" aria-label="Scroll right" onClick={() => scrollKpis(1)}>
+            <Icon name="ChevronRight" size={16} />
+          </button>
+        )}
+      </div>
+
+      {candidateUpdates.length > 0 && (
+        <section className="ta-updates">
+          <button type="button" className="ta-updates__head" onClick={() => setUpdatesOpen((v) => !v)} aria-expanded={updatesOpen}>
+            <span className="ta-updates__lead">
+              <strong>Candidate updates</strong>
+              <span className="ta-updates__count">{candidateUpdates.length}</span>
+            </span>
+            <span className="ta-updates__toggle">
+              <span className="ta-link" role="link" onClick={(e) => { e.stopPropagation(); navigate('/ta/activity'); }}>View all</span>
+              <Icon name={updatesOpen ? 'ChevronUp' : 'ChevronDown'} size={16} />
+            </span>
+          </button>
+          {updatesOpen && (
+            <div className="ta-updates__list">
+              {candidateUpdates.map((u) => (
+                <button key={u.id} type="button" className="ta-updates__row" onClick={() => navigate(`/ta/candidates/${u.candidateId}`)}>
+                  <span className="ta-updates__icon"><Icon name={UPDATE_ICON[u.title] || 'Bell'} size={14} /></span>
+                  <span className="ta-updates__body">
+                    <span className="ta-updates__title">{u.who} — {u.title}</span>
+                    <span className="ta-cell-sub">{u.description}</span>
+                  </span>
+                  <span className="ta-updates__when">{timeAgo(u.at)} <Icon name="ArrowRight" size={13} /></span>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      <div className="ta-bento">
+        <Card title="Candidates Pipeline" action={periodSelect}>
+          <div className="ta-pipe-wrap">
+            <div className="ta-pipe">
+              {stageRows.map((s) => (
+                <button
+                  key={s.label}
+                  className={`ta-pipe__row${s.label === busiest.label ? ' ta-pipe__row--active' : ''}`}
+                  onClick={() => navigate(`/ta/candidates?stage=${s.key}`)}
+                >
+                  <span
+                    className="ta-pipe__icon"
+                    style={{ '--p-bg': `var(--tag-${s.tone}-bg)`, '--p-fg': `var(--tag-${s.tone}-fg)` }}
+                  >
+                    <Icon name={s.icon} size={15} />
+                  </span>
+                  <span className="ta-pipe__label">{s.label}</span>
+                  <span className="ta-pipe__count">{s.value}</span>
+                </button>
+              ))}
+            </div>
+            <FunnelChart
+              stages={stageRows}
+              onSegmentClick={(i) => navigate(`/ta/candidates?stage=${stageRows[i].key}`)}
+            />
+          </div>
+        </Card>
+
+        <Card title="Applications Overview" action={periodSelect}>
+          {sourceSlices.length === 0 ? (
+            <p className="ta-cell-mute">No applications in this period.</p>
+          ) : (
+            <>
+              <DonutChart
+                slices={sourceSlices}
+                caption="Total"
+                onSliceClick={(label) => navigate(`/ta/candidates?source=${encodeURIComponent(label)}`)}
+              />
+              {(() => {
+                const total = sourceSlices.reduce((s, x) => s + x.value, 0) || 1;
+                const top = [...sourceSlices].sort((a, b) => b.value - a.value)[0];
+                return (
+                  <div className="ta-donut-note">
+                    <span className="ta-legend__dot" style={{ background: top.color }} />
+                    <span><strong>{top.label}</strong> is the leading channel — {Math.round((top.value / total) * 100)}% of applications in this period.</span>
+                  </div>
+                );
+              })()}
+            </>
+          )}
+        </Card>
+      </div>
+
+      {/* Notice Period Analysis — one glance tells TA how many candidates
+          are close to being free to join, so they know who to chase. */}
+      <Card
+        title="Notice Period Analysis"
+        action={<button className="ta-link" onClick={() => navigate('/ta/candidates')}>View candidates <Icon name="ArrowRight" size={13} /></button>}
+      >
+        {activeForNotice.length === 0 ? (
+          <p className="ta-cell-mute">No active candidates to analyse.</p>
+        ) : (
+          <>
+            {/* Donut chart: candidates grouped by their notice period length.
+                Clicking a slice/legend row jumps to the candidates table, pre-filtered to it. */}
+            <DonutChart
+              slices={noticeSlices}
+              caption="Candidates"
+              onSliceClick={(label) => navigate(`/ta/candidates?notice=${encodeURIComponent(label)}`)}
+            />
+
+            {/* Callout: how many can join soon, so TA knows to follow up now */}
+            <button className="ta-notice-callout" onClick={() => navigate('/ta/candidates')}>
+              <Icon name="CalendarClock" size={16} />
+              <span>
+                <b>{soonCount}</b> candidate{soonCount === 1 ? '' : 's'} can join within {SOON_THRESHOLD_DAYS} days — reach out now
+              </span>
+            </button>
+          </>
+        )}
+      </Card>
+    </>
+  );
+}
