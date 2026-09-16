@@ -10,7 +10,6 @@ import { EmptyState } from '../../components/common/States.jsx';
 import { useApp } from '../../context/AppContext.jsx';
 import { useToast } from '../../context/ToastContext.jsx';
 import { APP_STATUS, OFFER_STATUS, OFFER_STATUS_META } from '../../constants/statuses.js';
-import { findJob } from '../../data/jobs.js';
 import { formatDate, formatCurrencyINR } from '../../utils/format.js';
 
 const COLUMNS = [
@@ -23,7 +22,7 @@ const COLUMNS = [
 ];
 
 export default function TAOffersPage() {
-  const { data, getApplication, offerFor, saveOffer, confirmOfferAccepted } = useApp();
+  const { data, getApplication, getJob, offerFor, saveOffer, confirmOfferAccepted } = useApp();
   const toast = useToast();
   const navigate = useNavigate();
   const [q, setQ] = useState('');
@@ -106,7 +105,14 @@ export default function TAOffersPage() {
                       <Button
                         size="sm"
                         icon="CheckCircle2"
-                        onClick={() => { confirmOfferAccepted(r.id); toast.success(`${r.candidate}'s acceptance confirmed — handed over to HR.`); }}
+                        onClick={async () => {
+                          try {
+                            await confirmOfferAccepted(r.id);
+                            toast.success(`${r.candidate}'s acceptance confirmed — handed over to HR.`);
+                          } catch (err) {
+                            toast.error(err.message || 'Something went wrong — please try again.');
+                          }
+                        }}
                       >
                         Confirm accepted
                       </Button>
@@ -127,12 +133,16 @@ export default function TAOffersPage() {
           open
           onClose={() => setPrepareApp(null)}
           application={prepareApp}
-          job={prepareApp.jobId ? findJob(prepareApp.jobId) : null}
+          job={prepareApp.jobId ? getJob(prepareApp.jobId) : null}
           existingOffer={null}
-          onSave={(payload) => {
-            saveOffer(prepareApp.id, payload, true);
+          onSave={async (payload) => {
+            try {
+              await saveOffer(prepareApp.id, payload, true);
+              toast.success('Extended offer recorded — awaiting the candidate\'s response.');
+            } catch (err) {
+              toast.error(err.message || 'Something went wrong — please try again.');
+            }
             setPrepareApp(null);
-            toast.success('Extended offer recorded — awaiting the candidate\'s response.');
           }}
         />
       )}

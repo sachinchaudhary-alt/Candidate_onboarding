@@ -84,7 +84,7 @@ export default function DocumentsReview({ basePath }) {
               </td>
               <td>
                 <div className="row gap-1">
-                  <Button size="sm" variant="ghost" icon="Eye" disabled={!r.fileName} onClick={() => toast.info(`Previewing ${r.fileName} (simulated).`)}>
+                  <Button size="sm" variant="ghost" icon="Eye" disabled={!r.fileUrl} onClick={() => window.open(r.fileUrl, '_blank', 'noreferrer')}>
                     View
                   </Button>
                   {r.status === DOC_STATUS.UPLOADED && (
@@ -110,7 +110,15 @@ export default function DocumentsReview({ basePath }) {
         label="Document Rejection Reason"
         confirmLabel="Reject Document"
         tone="danger"
-        onSubmit={(reason) => { rejectDocument(rejecting.id, reason); setRejecting(null); toast.success('Document rejected — candidate notified.'); }}
+        onSubmit={async (reason) => {
+          try {
+            await rejectDocument(rejecting.id, reason);
+            toast.success('Document rejected — candidate notified.');
+          } catch (err) {
+            toast.error(err.message || 'Something went wrong — please try again.');
+          }
+          setRejecting(null);
+        }}
       />
       <ConfirmDialog
         open={!!verifying}
@@ -118,7 +126,15 @@ export default function DocumentsReview({ basePath }) {
         title={`Verify "${verifying?.label}"?`}
         message="This marks the document as verified on record."
         confirmLabel="Verify"
-        onConfirm={() => { verifyDocument(verifying.id); toast.success('Document verified.'); setVerifying(null); }}
+        onConfirm={async () => {
+          try {
+            await verifyDocument(verifying.id);
+            toast.success('Document verified.');
+          } catch (err) {
+            toast.error(err.message || 'Something went wrong — please try again.');
+          }
+          setVerifying(null);
+        }}
       />
     </div>
   );

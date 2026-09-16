@@ -23,10 +23,15 @@ export default function OfferDrawer({ open, onClose, application, job, existingO
     benefits: existingOffer?.benefits || '',
   }));
   const [error, setError] = useState('');
+  const [compError, setCompError] = useState('');
   const set = (patch) => setF((prev) => ({ ...prev, ...patch }));
 
   const save = () => {
-    if (!f.joiningDate) { setError('Expected joining date is required.'); return; }
+    const noJoiningDate = !f.joiningDate;
+    const badCompensation = !f.compensation || Number.isNaN(Number(f.compensation));
+    setError(noJoiningDate ? 'Expected joining date is required.' : '');
+    setCompError(badCompensation ? 'Enter a valid compensation amount.' : '');
+    if (noJoiningDate || badCompensation) return;
     onSave(f, true);
   };
 
@@ -55,6 +60,9 @@ export default function OfferDrawer({ open, onClose, application, job, existingO
         </Field>
         <Field label="Expected joining date" required error={error}>
           <Input type="date" value={f.joiningDate} onChange={(e) => set({ joiningDate: e.target.value })} error={error} />
+        </Field>
+        <Field label="Compensation (₹ / year)" required error={compError}>
+          <Input type="number" value={f.compensation} onChange={(e) => set({ compensation: e.target.value })} error={compError} placeholder="e.g. 1800000" />
         </Field>
         <Field label="Reporting manager" full>
           <Input value={f.reportingManager} onChange={(e) => set({ reportingManager: e.target.value })} placeholder="Optional" />

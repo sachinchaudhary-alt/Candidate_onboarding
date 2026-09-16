@@ -1,892 +1,723 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage.js';
-import { buildSeed, SEED_VERSION } from '../data/seed.js';
-import { JOBS, findJob } from '../data/jobs.js';
-import {
-  APP_STATUS,
-  ROUND_STATUS,
-  DOC_STATUS,
-  OFFER_STATUS,
-  REQUIRED_DOCUMENTS,
-  isDocMandatory,
-} from '../constants/statuses.js';
-import { ROLES } from '../constants/roles.js';
-import { TA_HEAD, isTAHead } from '../constants/taTeam.js';
-import {
-  makeCandidateId,
-  makeApplicationId,
-  makeEmployeeId,
-  makeOfferId,
-  uid,
-} from '../utils/ids.js';
+import { api } from '../utils/api.js';
 
-const DATA_KEY = 'talentflow.data.v7'; // bumped: new onboarding-verification statuses replace OFFER_PENDING_HR
 const ROLE_KEY = 'talentflow.role.v3';
 const TA_IDENTITY_KEY = 'talentflow.taIdentity.v1';
+const MY_APPLICATION_KEY = 'talentflow.myApplicationId.v1';
+const TA_HEAD = 'Himanshu Singh';
+const isTAHead = (name) => name === TA_HEAD;
 
 const AppContext = createContext(null);
 
+/* ---------- mapping: backend rows -> the shape the UI already expects ---------- */
+
+function splitList(s) {
+  return s ? s.split(',').map((x) => x.trim()).filter(Boolean) : [];
+}
+
+function mapJob(j) {
+  return {
+    id: j.jobId,
+    title: j.jobTitle,
+    department: j.department,
+    location: j.location,
+    workMode: '',
+    employmentType: '',
+    experience: j.experienceMin != null && j.experienceMax != null ? `${j.experienceMin}–${j.experienceMax} years` : '',
+    deadline: null,
+    description: j.jobDescription || '',
+    responsibilities: [],
+    requiredSkills: splitList(j.requiredSkills),
+    qualifications: [],
+    preferredSkills: [],
+    benefits: [],
+    custom: true,
+  };
+}
+
+function mapPersonal(c) {
+  return {
+    firstName: c?.firstName || '', middleName: '', lastName: c?.lastName || '',
+    email: c?.email || '', mobile: c?.mobileNumber || '', dob: c?.dateOfBirth || '', gender: c?.gender || '', nationality: c?.nationality || '',
+    currentLocation: c?.currentLocation || '', preferredLocation: c?.preferredLocation || '',
+    address: { line1: '', line2: '', city: c?.currentLocation || '', state: '', country: 'India', postalCode: '' },
+    aadharNumber: c?.aadharNumber || '',
+  };
+}
+function mapProfessional(c) {
+  return {
+    currentJobTitle: c?.currentDesignation || '', currentCompany: c?.currentCompany || '',
+    totalExperience: c?.totalExperience != null ? String(c.totalExperience) : '',
+    relevantExperience: c?.relevantExperience != null ? String(c.relevantExperience) : '',
+    employmentStatus: c?.experienceType || '',
+    currentCTC: c?.currentCTC != null ? String(c.currentCTC) : '', expectedCTC: c?.expectedCTC != null ? String(c.expectedCTC) : '',
+    noticePeriod: c?.noticePeriod || '', preferredJobLocation: c?.preferredLocation || '',
+    skills: splitList(c?.skills), certifications: splitList(c?.certifications), languages: splitList(c?.languages),
+  };
+}
+function mapAdditional(c) {
+  return { coverNote: c?.coverNote || '', referral: c?.referral || '', portfolio: c?.portfolio || '' };
+}
+function mapResume(c) {
+  return c?.resumeFileName ? { name: c.resumeFileName, size: c.resumeSize || 0, uploadedAt: c.resumeUploadedAt } : null;
+}
+
+function mapApplication(a, candidate) {
+  return {
+    id: a.applicationId,
+    candidateId: a.candidateId,
+    jobId: a.jobId || null,
+    jobTitle: a.jobTitle || 'General Application',
+    isGeneral: !a.jobId,
+    source: a.source || 'Direct',
+    status: a.status,
+    submittedAt: a.createdAt,
+    assignedTo: a.assignedTo || null,
+    autofilled: [],
+    returnReason: a.status === 'RETURNED' ? a.rejectionReason : null,
+    rejectReason: a.status === 'REJECTED' ? a.rejectionReason : null,
+    docReviewRejectReason: a.docReviewRejectReason || null,
+    onboarding: a.onboardingFormData ? JSON.parse(a.onboardingFormData) : null,
+    onboardingRejectReason: a.onboardingRejectReason || null,
+    personal: mapPersonal(candidate),
+    professional: mapProfessional(candidate),
+    education: (candidate?.educations || []).map((e) => ({
+      id: e.ID, qualification: e.qualification, university: e.institute, specialization: e.specialization, year: e.passingYear, grade: e.percentageCgpa,
+    })),
+    additional: mapAdditional(candidate),
+    resume: mapResume(candidate),
+  };
+}
+
+function mapDocument(d) {
+  return {
+    id: d.ID,
+    applicationId: d.applicationId,
+    key: d.docKey,
+    label: d.label,
+    required: d.required,
+    category: d.category,
+    status: d.status,
+    fileName: d.fileName,
+    // Only set once a file actually exists — points at the OData media
+    // property's standard $value URL, which streams the real bytes back.
+    fileUrl: d.fileName ? api.documentFileUrl(d.ID) : null,
+    uploadedAt: d.uploadedAt,
+    verifiedAt: d.verifiedAt,
+    rejectionReason: d.rejectionReason,
+    skipReason: d.skipReason,
+    reasonAccepted: d.reasonAccepted,
+    hrApprovedAt: d.hrApprovedAt,
+  };
+}
+
+function mapInterview(i) {
+  return {
+    id: i.ID, applicationId: i.applicationId, round: i.round, type: i.type, interviewer: i.interviewer,
+    date: i.date, time: i.time, mode: i.mode, link: i.link, location: i.location, notes: i.notes,
+    status: i.status, result: i.result, comments: i.comments, shareComments: i.shareComments,
+  };
+}
+
+function mapOffer(o) {
+  return {
+    id: o.ID, applicationId: o.applicationId, candidateName: o.candidateName, jobTitle: o.jobTitle,
+    department: o.department, location: o.location, joiningDate: o.joiningDate, employmentType: o.employmentType,
+    compensation: o.compensation, benefits: o.benefits, reportingManager: o.reportingManager, probationPeriod: o.probationPeriod,
+    status: o.status, createdAt: o.createdAt, issuedAt: o.issuedAt, decisionAt: o.decisionAt,
+  };
+}
+
+function mapEmployee(e) {
+  return {
+    id: e.employeeId, applicationId: e.applicationId, name: e.name, position: e.position,
+    department: e.department, teamRole: e.teamRole, joiningDate: e.joiningDate, createdAt: e.createdAt,
+  };
+}
+
+function mapActivity(a) {
+  return { id: a.ID, applicationId: a.applicationId, type: a.type, title: a.title, description: a.description, actor: a.actor, at: a.createdAt };
+}
+
+function mapNotification(n) {
+  return { id: n.ID, role: n.role, title: n.title, body: n.body, read: n.read, at: n.createdAt };
+}
+
 export function AppProvider({ children }) {
-  const [data, setData] = useLocalStorage(DATA_KEY, () => buildSeed());
   const [role, setRole] = useLocalStorage(ROLE_KEY, null);
-  // Which TA is "acting" right now — simulated identity, not real auth. Only
-  // matters while role === 'ta'; defaults to the Head.
+  // Which TA is "acting" right now — simulated identity, not real auth.
   const [taIdentity, setTaIdentity] = useLocalStorage(TA_IDENTITY_KEY, TA_HEAD);
+  // Which application belongs to "me" while browsing as a candidate — this
+  // browser's own session pointer, not shared data, so it stays local.
+  const [myApplicationId, setMyApplicationId] = useLocalStorage(MY_APPLICATION_KEY, null);
 
-  // Demo data from an older seed shape is rebuilt automatically — the storage
-  // key stays the same, we just re-seed when the version inside it is behind.
-  const stored = typeof data === 'function' ? null : data;
-  const isStale = !stored || stored.seedVersion !== SEED_VERSION;
-  const [reseeded] = useState(() => (isStale ? buildSeed() : null));
+  // Everything else is real backend data — fetched on mount and refreshed
+  // after every write, same pattern already proven for jobs.
+  const [jobs, setJobs] = useState([]);
+  const [applications, setApplications] = useState([]);
+  const [documents, setDocuments] = useState([]);
+  const [interviews, setInterviews] = useState([]);
+  const [offers, setOffers] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [activities, setActivities] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+
+  // Reference data (companies / states / cities) for form dropdowns — static
+  // enough that it's fetched once, separately from the refreshAll() cycle
+  // the transactional data goes through after every write.
+  const [companies, setCompanies] = useState([]);
+  const [states, setStates] = useState([]);
+  const [cities, setCities] = useState([]);
   useEffect(() => {
-    if (isStale) setData(reseeded);
-    // run once on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    api.getLookups()
+      .then((res) => {
+        const rows = res.value || [];
+        setCompanies(rows.filter((r) => r.type === 'COMPANY').map((r) => r.text).sort());
+        setStates(rows.filter((r) => r.type === 'STATE').map((r) => ({ code: r.code, name: r.text })).sort((a, b) => a.name.localeCompare(b.name)));
+        setCities(rows.filter((r) => r.type === 'CITY').map((r) => ({ stateCode: r.code, name: r.text })));
+      })
+      .catch((err) => console.warn('Failed to load lookup values from backend:', err));
   }, []);
-  const state = isStale ? reseeded : stored;
 
-  /* ---------- internal helpers ---------- */
-  const mutate = useCallback(
-    (fn) =>
-      setData((prev) => {
-        const draft = structuredCloneSafe(prev);
-        fn(draft);
-        return draft;
-      }),
-    [setData]
-  );
-
-  const logActivity = (draft, applicationId, type, title, description, actor = 'System') => {
-    draft.activities.unshift({
-      id: uid('act'),
-      applicationId,
-      type,
-      title,
-      description,
-      actor,
-      at: new Date().toISOString(),
-    });
-  };
-
-  const notify = (draft, roleTarget, title, body) => {
-    draft.notifications.unshift({
-      id: uid('ntf'),
-      role: roleTarget,
-      title,
-      body,
-      at: new Date().toISOString(),
-      read: false,
-    });
-  };
-
-  // No email provider is wired up yet — this just queues what would be sent,
-  // so real delivery can be plugged in later without touching call sites.
-  const queueEmail = (draft, { to, subject, body, applicationId }) => {
-    if (!draft.emails) draft.emails = [];
-    draft.emails.unshift({
-      id: uid('mail'),
-      to,
-      subject,
-      body,
-      applicationId,
-      status: 'queued',
-      at: new Date().toISOString(),
-    });
-  };
-
-  // A required doc is "cleared" when it's verified, or (for non-mandatory docs)
-  // when the candidate has given a reason for not providing it.
-  const allRequiredDocsCleared = (draft, applicationId) => {
-    const docs = draft.documents.filter((d) => d.applicationId === applicationId && d.required);
-    if (docs.length === 0) return false;
-    return docs.every(
-      (d) => d.status === DOC_STATUS.VERIFIED || (d.status === DOC_STATUS.WAIVED && !isDocMandatory(d.key) && d.reasonAccepted)
-    );
-  };
-
-  // TA finishing verification no longer unlocks the offer directly — it sends
-  // the batch to HR for a second, independent review (HR_DOC_REVIEW). Also
-  // re-fires when TA re-clears docs after HR sent them back (HR_DOC_REJECTED),
-  // looping it back to HR automatically.
-  const maybeAdvanceDocs = (draft, applicationId) => {
-    if (!allRequiredDocsCleared(draft, applicationId)) return;
-    const app = draft.applications.find((a) => a.id === applicationId);
-    if (app && (app.status === APP_STATUS.DOC_VERIFICATION || app.status === APP_STATUS.HR_DOC_REJECTED)) {
-      app.status = APP_STATUS.HR_DOC_REVIEW;
-      logActivity(draft, app.id, 'documents', 'All Documents Verified', 'All mandatory documents verified. Sent to HR for document review.', 'Himanshu Singh');
-      notify(draft, ROLES.HR, 'Documents ready for review', `All documents cleared for ${app.personal.firstName} ${app.personal.lastName}. Please review and approve.`);
-    }
-  };
+  const refreshAll = useCallback(() => {
+    return Promise.all([
+      api.getJobs(), api.getCandidates(), api.getEducations(), api.getApplications(), api.getDocuments(),
+      api.getInterviews(), api.getOffers(), api.getEmployees(), api.getActivities(), api.getNotifications(),
+    ])
+      .then(([jobsRes, candsRes, eduRes, appsRes, docsRes, ivRes, offRes, empRes, actRes, notRes]) => {
+        const candById = new Map((candsRes.value || []).map((c) => [c.candidateId, c]));
+        const eduByCandidate = new Map();
+        (eduRes.value || []).forEach((e) => {
+          if (!eduByCandidate.has(e.candidateId)) eduByCandidate.set(e.candidateId, []);
+          eduByCandidate.get(e.candidateId).push(e);
+        });
+        setJobs((jobsRes.value || []).map(mapJob));
+        setApplications((appsRes.value || []).map((a) => mapApplication(a, { ...candById.get(a.candidateId), educations: eduByCandidate.get(a.candidateId) })));
+        setDocuments((docsRes.value || []).map(mapDocument));
+        setInterviews((ivRes.value || []).map(mapInterview));
+        setOffers((offRes.value || []).map(mapOffer));
+        setEmployees((empRes.value || []).map(mapEmployee));
+        setActivities((actRes.value || []).map(mapActivity));
+        setNotifications((notRes.value || []).map(mapNotification));
+      })
+      .catch((err) => console.warn('Failed to load data from backend:', err))
+      .finally(() => setLoaded(true));
+  }, []);
+  useEffect(() => { refreshAll(); }, [refreshAll]);
 
   /* ---------- candidate: submit application ---------- */
   const submitApplication = useCallback(
-    (form) => {
-      const candidateSeq = (state.counters?.candidate || 0) + 1;
-      const applicationSeq = (state.counters?.application || 0) + 1;
-      const candidateId = makeCandidateId(candidateSeq);
-      const applicationId = makeApplicationId(applicationSeq);
-      mutate((draft) => {
-        draft.counters.candidate = candidateSeq;
-        draft.counters.application = applicationSeq;
-        const job = form.jobId ? (draft.jobs || []).find((j) => j.id === form.jobId) || findJob(form.jobId) : null;
-
-        const application = {
-          id: applicationId,
-          candidateId,
-          jobId: form.jobId || null,
-          jobTitle: job ? job.title : 'General Application',
-          isGeneral: !form.jobId,
-          source: form.source || 'Direct',
-          status: APP_STATUS.SUBMITTED,
-          submittedAt: new Date().toISOString(),
-          assignedTo: null, // self-sourced lead — sits in the TA Head's Unassigned queue until assigned
-          autofilled: form.autofilled || [],
-          returnReason: null,
-          rejectReason: null,
-          personal: form.personal,
-          professional: form.professional,
-          education: form.education,
-          additional: form.additional,
-          resume: form.resume,
-        };
-        draft.applications.unshift(application);
-        draft.myApplicationId = applicationId;
-
-        REQUIRED_DOCUMENTS.forEach((d) => {
-          draft.documents.push({
-            id: uid('doc'),
-            applicationId,
-            key: d.key,
-            label: d.label,
-            required: d.required,
-            category: d.category,
-            status: DOC_STATUS.PENDING,
-            fileName: null,
-            uploadedAt: null,
-            verifiedAt: null,
-            rejectionReason: null,
-          });
-        });
-
-        logActivity(
-          draft,
-          applicationId,
-          'application',
-          'Application Submitted',
-          `Candidate applied for ${application.jobTitle}.`,
-          `${form.personal.firstName} ${form.personal.lastName}`
-        );
-        notify(
-          draft,
-          ROLES.TA,
-          'New application received',
-          `${form.personal.firstName} ${form.personal.lastName} applied for ${application.jobTitle}.`
-        );
+    async (form) => {
+      if (!form.jobId) {
+        throw new Error('Choose a job to apply for — general applications need a backend job to attach to.');
+      }
+      const res = await api.applyForJob({
+        jobId: form.jobId,
+        firstName: form.personal.firstName,
+        lastName: form.personal.lastName,
+        email: form.personal.email,
+        mobileNumber: form.personal.mobile,
+        aadharNumber: form.personal.aadharNumber,
+        dateOfBirth: form.personal.dob || null,
+        gender: form.personal.gender || null,
+        nationality: form.personal.nationality || null,
+        currentLocation: form.personal.currentLocation || null,
+        preferredLocation: form.personal.preferredLocation || null,
+        currentCompany: form.professional.currentCompany || null,
+        currentJobTitle: form.professional.currentJobTitle || null,
+        totalExperience: form.professional.totalExperience || null,
+        relevantExperience: form.professional.relevantExperience || null,
+        employmentStatus: form.professional.employmentStatus || null,
+        currentCTC: form.professional.currentCTC || null,
+        expectedCTC: form.professional.expectedCTC || null,
+        noticePeriod: form.professional.noticePeriod || null,
+        skills: (form.professional.skills || []).join(', '),
+        certifications: (form.professional.certifications || []).join(', '),
+        languages: (form.professional.languages || []).join(', '),
+        coverNote: form.additional?.coverNote || null,
+        referral: form.additional?.referral || null,
+        portfolio: form.additional?.portfolio || null,
+        resumeFileName: form.resume?.name || null,
+        resumeSize: form.resume?.size || null,
+        source: form.source || 'Direct',
+        education: JSON.stringify(form.education || []),
       });
-      return { candidateId, applicationId };
+      setMyApplicationId(res.application.applicationId);
+      await refreshAll();
+      return { candidateId: res.candidate.candidateId, applicationId: res.application.applicationId };
     },
-    [mutate, state.counters]
-  );
-
-  const updateApplication = useCallback(
-    (applicationId, patch) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        Object.assign(app, patch);
-      });
-    },
-    [mutate]
+    [refreshAll, setMyApplicationId]
   );
 
   const resubmitApplication = useCallback(
-    (applicationId) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.TA_REVIEW;
-        app.returnReason = null;
-        logActivity(draft, applicationId, 'application', 'Application Resubmitted', 'Candidate resubmitted the application after changes.', 'Candidate');
-        notify(draft, ROLES.TA, 'Application resubmitted', `${app.personal.firstName} ${app.personal.lastName} resubmitted their application.`);
-      });
+    async (applicationId) => {
+      await api.patchApplication(applicationId, { status: 'TA_REVIEW', rejectionReason: null });
+      const app = applications.find((a) => a.id === applicationId);
+      await api.logActivity(applicationId, 'application', 'Application Resubmitted', 'Candidate resubmitted the application after changes.', 'Candidate');
+      await api.notify('TA', 'Application resubmitted', `${app?.personal.firstName} ${app?.personal.lastName} resubmitted their application.`);
+      await refreshAll();
     },
-    [mutate]
+    [applications, refreshAll]
   );
 
   /* ---------- TA review workflow ---------- */
   const startReview = useCallback(
-    (applicationId) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app || app.status !== APP_STATUS.SUBMITTED) return;
-        app.status = APP_STATUS.TA_REVIEW;
-        logActivity(draft, applicationId, 'review', 'TA Review Started', 'Talent Acquisition began reviewing the application.', 'Himanshu Singh');
-      });
+    async (applicationId) => {
+      const app = applications.find((a) => a.id === applicationId);
+      if (!app || app.status !== 'SUBMITTED') return;
+      await api.patchApplication(applicationId, { status: 'TA_REVIEW' });
+      await api.logActivity(applicationId, 'review', 'TA Review Started', 'Talent Acquisition began reviewing the application.', 'Himanshu Singh');
+      await refreshAll();
     },
-    [mutate]
+    [applications, refreshAll]
   );
 
   const approveApplication = useCallback(
-    (applicationId) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.INTERVIEW_PLANNING;
-        logActivity(draft, applicationId, 'approve', 'Application Approved', 'TA approved the candidate and moved them to Interview Planning.', 'Himanshu Singh');
-        notify(draft, ROLES.CANDIDATE, 'Application approved', `Your application for ${app.jobTitle} was approved. Interview scheduling is next.`);
-      });
+    async (applicationId) => {
+      await api.reviewApplication({ applicationId, decision: 'INTERVIEW_PLANNING' });
+      await refreshAll();
     },
-    [mutate]
+    [refreshAll]
   );
 
   const returnApplication = useCallback(
-    (applicationId, reason) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.RETURNED;
-        app.returnReason = reason;
-        logActivity(draft, applicationId, 'return', 'Application Returned', `Returned to candidate: ${reason}`, 'Himanshu Singh');
-        notify(draft, ROLES.CANDIDATE, 'Action needed on your application', reason);
-      });
+    async (applicationId, reason) => {
+      await api.reviewApplication({ applicationId, decision: 'RETURNED', reason });
+      await refreshAll();
     },
-    [mutate]
+    [refreshAll]
   );
 
   const rejectApplication = useCallback(
-    (applicationId, reason) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.REJECTED;
-        app.rejectReason = reason;
-        logActivity(draft, applicationId, 'reject', 'Application Rejected', `Rejected: ${reason}`, 'Himanshu Singh');
-        notify(draft, ROLES.CANDIDATE, 'Application update', `Your application for ${app.jobTitle} was not taken forward.`);
-      });
+    async (applicationId, reason) => {
+      await api.reviewApplication({ applicationId, decision: 'REJECTED', reason });
+      await refreshAll();
     },
-    [mutate]
+    [refreshAll]
   );
 
   // TA Head hands a self-sourced (unassigned) or existing lead to a specific TA.
   const assignApplicationToTA = useCallback(
-    (applicationId, taName) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app || !taName) return;
-        const wasUnassigned = !app.assignedTo;
-        app.assignedTo = taName;
-        logActivity(
-          draft,
-          applicationId,
-          'assignment',
-          wasUnassigned ? 'Assigned to TA' : 'Reassigned to TA',
-          `${taName} was assigned to this candidate.`,
-          taIdentity
-        );
-      });
+    async (applicationId, taName) => {
+      if (!taName) return;
+      const app = applications.find((a) => a.id === applicationId);
+      const wasUnassigned = !app?.assignedTo;
+      await api.patchApplication(applicationId, { assignedTo: taName });
+      await api.logActivity(applicationId, 'assignment', wasUnassigned ? 'Assigned to TA' : 'Reassigned to TA', `${taName} was assigned to this candidate.`, taIdentity);
+      await refreshAll();
     },
-    [mutate, taIdentity]
+    [applications, taIdentity, refreshAll]
   );
 
   /* ---------- interviews ---------- */
   const scheduleInterview = useCallback(
-    (applicationId, payload) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        const existing = draft.interviews.filter((i) => i.applicationId === applicationId);
-        const round = existing.length + 1;
-        draft.interviews.push({
-          id: uid('int'),
-          applicationId,
-          round,
-          type: payload.type,
-          interviewer: payload.interviewer,
-          date: payload.date,
-          time: payload.time,
-          mode: payload.mode,
-          link: payload.link || '',
-          location: payload.location || '',
-          notes: payload.notes || '',
-          status: ROUND_STATUS.SCHEDULED,
-          result: null,
-          comments: '',
-          shareComments: false, // remarks are internal unless the TA chooses to share them
-        });
-        if (app.status === APP_STATUS.INTERVIEW_PLANNING || app.status === APP_STATUS.INTERVIEW_PASSED) {
-          app.status = APP_STATUS.INTERVIEW_IN_PROGRESS;
-        }
-        logActivity(draft, applicationId, 'interview', `${payload.type} Scheduled`, `Round ${round} scheduled for ${payload.date} at ${payload.time} (${payload.mode}).`, 'Himanshu Singh');
-        notify(draft, ROLES.CANDIDATE, 'Interview scheduled', `${payload.type} (Round ${round}) on ${payload.date} at ${payload.time}.`);
-      });
+    async (applicationId, payload) => {
+      const created = await api.scheduleInterview({ applicationId, ...payload });
+      await refreshAll();
+      return mapInterview(created);
     },
-    [mutate]
+    [refreshAll]
   );
 
   const recordInterviewResult = useCallback(
-    (interviewId, { result, comments, shareComments = false }) => {
-      mutate((draft) => {
-        const iv = draft.interviews.find((i) => i.id === interviewId);
-        if (!iv) return;
-        if (!comments || !comments.trim()) return; // feedback is mandatory to record a result
-        iv.result = result;
-        iv.comments = comments;
-        iv.shareComments = !!shareComments;
-        iv.status = result; // PASS | FAIL | HOLD
-        const app = draft.applications.find((a) => a.id === iv.applicationId);
-        if (!app) return;
-
-        if (shareComments) {
-          queueEmail(draft, {
-            to: app.personal.email,
-            applicationId: app.id,
-            subject: `Interview feedback — ${iv.type} (Round ${iv.round})`,
-            body: comments,
-          });
-        }
-
-        if (result === ROUND_STATUS.FAIL) {
-          app.status = APP_STATUS.INTERVIEW_FAILED;
-          logActivity(draft, app.id, 'interview', `${iv.type} — Failed`, `Round ${iv.round} result recorded: Fail.`, 'Himanshu Singh');
-          notify(draft, ROLES.CANDIDATE, 'Interview update', `Unfortunately you did not clear the ${iv.type}.`);
-          return;
-        }
-        if (result === ROUND_STATUS.HOLD) {
-          logActivity(draft, app.id, 'interview', `${iv.type} — On Hold`, `Round ${iv.round} result recorded: Hold.`, 'Himanshu Singh');
-          return;
-        }
-        // PASS
-        logActivity(draft, app.id, 'interview', `${iv.type} — Passed`, `Round ${iv.round} result recorded: Pass.`, 'Himanshu Singh');
-        const rounds = draft.interviews.filter((i) => i.applicationId === app.id);
-        const pending = rounds.some((r) => r.status === ROUND_STATUS.SCHEDULED || r.status === ROUND_STATUS.COMPLETED);
-        if (!pending) {
-          app.status = APP_STATUS.INTERVIEW_PASSED;
-          logActivity(draft, app.id, 'interview', 'All Scheduled Rounds Passed', 'Add another round or move the candidate to document verification.', 'Himanshu Singh');
-        }
-      });
+    async (interviewId, { result, comments, shareComments = false }) => {
+      if (!comments || !comments.trim()) return; // feedback is mandatory to record a result
+      await api.recordInterviewResult({ interviewId, result, comments, shareComments });
+      await refreshAll();
     },
-    [mutate]
+    [refreshAll]
   );
 
   const advanceToDocuments = useCallback(
-    (applicationId) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app || app.status !== APP_STATUS.INTERVIEW_PASSED) return;
-        app.status = APP_STATUS.DOC_VERIFICATION;
-        logActivity(draft, applicationId, 'documents', 'Moved to Document Verification', 'All required interview rounds passed.', 'Himanshu Singh');
-        notify(draft, ROLES.CANDIDATE, 'Interviews cleared', 'Please upload your verification documents.');
-      });
+    async (applicationId) => {
+      const app = applications.find((a) => a.id === applicationId);
+      if (!app || app.status !== 'INTERVIEW_PASSED') return;
+      await api.patchApplication(applicationId, { status: 'DOC_VERIFICATION' });
+      await api.logActivity(applicationId, 'documents', 'Moved to Document Verification', 'All required interview rounds passed.', 'Himanshu Singh');
+      await api.notify('CANDIDATE', 'Interviews cleared', 'Please upload your verification documents.', applicationId);
+      await refreshAll();
     },
-    [mutate]
+    [applications, refreshAll]
+  );
+
+  // A required doc is "cleared" when it's verified, or (for non-mandatory
+  // docs) when the candidate has given a reason that's been accepted.
+  //
+  // This re-fetches straight from the backend rather than reading the
+  // `documents` state array: it's called right after this same document's
+  // own PATCH, before that PATCH has round-tripped through refreshAll(), so
+  // the local state is one update behind — checking it here would miss the
+  // very PATCH that just made every document cleared.
+  const allRequiredDocsCleared = useCallback(async (applicationId) => {
+    const res = await api.getDocumentsFor(applicationId);
+    const docs = (res.value || []).filter((d) => d.required);
+    if (docs.length === 0) return false;
+    return docs.every((d) => d.status === 'VERIFIED' || (d.status === 'WAIVED' && d.reasonAccepted));
+  }, []);
+
+  // TA finishing verification sends the batch to HR for a second, independent
+  // review — also re-fires when TA re-clears docs after HR sent them back.
+  const maybeAdvanceDocs = useCallback(
+    async (applicationId) => {
+      if (!(await allRequiredDocsCleared(applicationId))) return;
+      const app = applications.find((a) => a.id === applicationId);
+      if (app && (app.status === 'DOC_VERIFICATION' || app.status === 'HR_DOC_REJECTED')) {
+        await api.patchApplication(applicationId, { status: 'HR_DOC_REVIEW' });
+        await api.logActivity(applicationId, 'documents', 'All Documents Verified', 'All mandatory documents verified. Sent to HR for document review.', 'Himanshu Singh');
+        await api.notify('HR', 'Documents ready for review', `All documents cleared for ${app.personal.firstName} ${app.personal.lastName}. Please review and approve.`);
+      }
+    },
+    [applications, allRequiredDocsCleared]
   );
 
   /* ---------- documents ---------- */
   const uploadDocument = useCallback(
-    (documentId, fileMeta) => {
-      mutate((draft) => {
-        const doc = draft.documents.find((d) => d.id === documentId);
-        if (!doc) return;
-        doc.status = DOC_STATUS.UPLOADED;
-        doc.fileName = fileMeta.name;
-        doc.uploadedAt = new Date().toISOString();
-        doc.rejectionReason = null;
-        doc.verifiedAt = null;
-        doc.skipReason = null;
-        logActivity(draft, doc.applicationId, 'documents', 'Document Uploaded', `${doc.label} uploaded and is under verification.`, 'Candidate');
-        notify(draft, ROLES.TA, 'Document uploaded', `${doc.label} uploaded for verification.`);
-      });
+    async (documentId, file) => {
+      const doc = documents.find((d) => d.id === documentId);
+      if (!doc) return;
+      // The actual file bytes go to SQLite via a plain multipart upload —
+      // that route also sets status/fileName/uploadedAt server-side.
+      await api.uploadDocumentFile(documentId, file);
+      await api.logActivity(doc.applicationId, 'documents', 'Document Uploaded', `${doc.label} uploaded and is under verification.`, 'Candidate');
+      await api.notify('TA', 'Document uploaded', `${doc.label} uploaded for verification.`);
+      await refreshAll();
     },
-    [mutate]
+    [documents, refreshAll]
   );
 
   const verifyDocument = useCallback(
-    (documentId) => {
-      mutate((draft) => {
-        const doc = draft.documents.find((d) => d.id === documentId);
-        if (!doc) return;
-        doc.status = DOC_STATUS.VERIFIED;
-        doc.verifiedAt = new Date().toISOString();
-        doc.rejectionReason = null;
-        doc.skipReason = null;
-        doc.hrApprovedAt = null; // re-verified — any earlier HR approval is stale
-        logActivity(draft, doc.applicationId, 'documents', 'Document Verified', `${doc.label} verified.`, 'Himanshu Singh');
-        maybeAdvanceDocs(draft, doc.applicationId);
+    async (documentId) => {
+      const doc = documents.find((d) => d.id === documentId);
+      if (!doc) return;
+      await api.patchDocument(documentId, {
+        status: 'VERIFIED', verifiedAt: new Date().toISOString(), rejectionReason: null, skipReason: null, hrApprovedAt: null,
       });
+      await api.logActivity(doc.applicationId, 'documents', 'Document Verified', `${doc.label} verified.`, 'Himanshu Singh');
+      await maybeAdvanceDocs(doc.applicationId);
+      await refreshAll();
     },
-    [mutate]
+    [documents, maybeAdvanceDocs, refreshAll]
   );
 
   /* ---------- candidate: give a reason for a document they can't provide ---------- */
   const waiveDocument = useCallback(
-    (documentId, reason) => {
-      mutate((draft) => {
-        const doc = draft.documents.find((d) => d.id === documentId);
-        if (!doc || isDocMandatory(doc.key)) return; // mandatory docs must be uploaded
-        doc.status = DOC_STATUS.WAIVED;
-        doc.skipReason = reason;
-        doc.reasonAccepted = null; // pending TA review — not auto-cleared
-        doc.fileName = null;
-        doc.uploadedAt = null;
-        doc.verifiedAt = null;
-        logActivity(draft, doc.applicationId, 'documents', 'Document Not Provided', `${doc.label} — reason: ${reason}`, 'Candidate');
-        notify(draft, ROLES.TA, 'Document reason submitted', `${doc.label} not provided by the candidate — a reason was given.`);
+    async (documentId, reason) => {
+      const doc = documents.find((d) => d.id === documentId);
+      if (!doc) return;
+      await api.patchDocument(documentId, {
+        status: 'WAIVED', skipReason: reason, reasonAccepted: null, fileName: null, uploadedAt: null, verifiedAt: null,
       });
+      await api.logActivity(doc.applicationId, 'documents', 'Document Not Provided', `${doc.label} — reason: ${reason}`, 'Candidate');
+      await api.notify('TA', 'Document reason submitted', `${doc.label} not provided by the candidate — a reason was given.`);
+      await refreshAll();
     },
-    [mutate]
+    [documents, refreshAll]
   );
 
-  // TA reviews the candidate's "can't provide" reason — accepting clears the
-  // document, rejecting sends it back requiring an actual upload.
   const acceptWaivedReason = useCallback(
-    (documentId) => {
-      mutate((draft) => {
-        const doc = draft.documents.find((d) => d.id === documentId);
-        if (!doc || doc.status !== DOC_STATUS.WAIVED) return;
-        doc.reasonAccepted = true;
-        logActivity(draft, doc.applicationId, 'documents', 'Reason Accepted', `${doc.label}: reason accepted — not required.`, 'Himanshu Singh');
-        maybeAdvanceDocs(draft, doc.applicationId);
-      });
+    async (documentId) => {
+      const doc = documents.find((d) => d.id === documentId);
+      if (!doc || doc.status !== 'WAIVED') return;
+      await api.patchDocument(documentId, { reasonAccepted: true });
+      await api.logActivity(doc.applicationId, 'documents', 'Reason Accepted', `${doc.label}: reason accepted — not required.`, 'Himanshu Singh');
+      await maybeAdvanceDocs(doc.applicationId);
+      await refreshAll();
     },
-    [mutate]
+    [documents, maybeAdvanceDocs, refreshAll]
   );
 
   const rejectWaivedReason = useCallback(
-    (documentId, note) => {
-      mutate((draft) => {
-        const doc = draft.documents.find((d) => d.id === documentId);
-        if (!doc) return;
-        doc.status = DOC_STATUS.REJECTED;
-        doc.reasonAccepted = false;
-        doc.rejectionReason = note;
-        doc.skipReason = null;
-        logActivity(draft, doc.applicationId, 'documents', 'Reason Rejected', `${doc.label}: reason not accepted — ${note}`, 'Himanshu Singh');
-        notify(draft, ROLES.CANDIDATE, 'Document required', `${doc.label}: ${note}`);
-      });
+    async (documentId, note) => {
+      const doc = documents.find((d) => d.id === documentId);
+      if (!doc) return;
+      await api.patchDocument(documentId, { status: 'REJECTED', reasonAccepted: false, rejectionReason: note, skipReason: null });
+      await api.logActivity(doc.applicationId, 'documents', 'Reason Rejected', `${doc.label}: reason not accepted — ${note}`, 'Himanshu Singh');
+      await api.notify('CANDIDATE', 'Document required', `${doc.label}: ${note}`, doc.applicationId);
+      await refreshAll();
     },
-    [mutate]
+    [documents, refreshAll]
   );
 
   const rejectDocument = useCallback(
-    (documentId, reason) => {
-      mutate((draft) => {
-        const doc = draft.documents.find((d) => d.id === documentId);
-        if (!doc) return;
-        doc.status = DOC_STATUS.REJECTED;
-        doc.rejectionReason = reason;
-        doc.verifiedAt = null;
-        doc.hrApprovedAt = null;
-        logActivity(draft, doc.applicationId, 'documents', 'Document Rejected', `${doc.label} rejected: ${reason}`, 'Himanshu Singh');
-        notify(draft, ROLES.CANDIDATE, 'Document rejected', `${doc.label}: ${reason}`);
-      });
+    async (documentId, reason) => {
+      const doc = documents.find((d) => d.id === documentId);
+      if (!doc) return;
+      await api.patchDocument(documentId, { status: 'REJECTED', rejectionReason: reason, verifiedAt: null, hrApprovedAt: null });
+      await api.logActivity(doc.applicationId, 'documents', 'Document Rejected', `${doc.label} rejected: ${reason}`, 'Himanshu Singh');
+      await api.notify('CANDIDATE', 'Document rejected', `${doc.label}: ${reason}`, doc.applicationId);
+      await refreshAll();
     },
-    [mutate]
+    [documents, refreshAll]
   );
 
-  // A required doc is HR-cleared once HR has individually approved it (or, for
-  // non-mandatory docs, the candidate gave a reason for not providing it).
-  const allDocsHrApproved = (draft, applicationId) => {
-    const docs = draft.documents.filter((d) => d.applicationId === applicationId && d.required);
+  // Same reasoning as allRequiredDocsCleared — fetch fresh so the document
+  // just approved (this same request, before refreshAll() catches up) counts.
+  const allDocsHrApproved = useCallback(async (applicationId) => {
+    const res = await api.getDocumentsFor(applicationId);
+    const docs = (res.value || []).filter((d) => d.required);
     if (docs.length === 0) return false;
-    return docs.every((d) => !!d.hrApprovedAt || (d.status === DOC_STATUS.WAIVED && !isDocMandatory(d.key)));
-  };
+    return docs.every((d) => !!d.hrApprovedAt || d.status === 'WAIVED');
+  }, []);
 
-  // HR's independent, per-document sign-off on what TA already verified — the
-  // second gate before TA can extend an offer. Once every required document
-  // has been individually approved, the whole application advances.
+  // HR's independent, per-document sign-off on what TA already verified.
+  // TEMPORARY: no HR app exists yet, so this is exposed on the TA screen as
+  // a clearly-marked "as HR" action — same backend endpoint either way.
   const approveDocument = useCallback(
-    (documentId) => {
-      mutate((draft) => {
-        const doc = draft.documents.find((d) => d.id === documentId);
-        if (!doc) return;
-        doc.hrApprovedAt = new Date().toISOString();
-        logActivity(draft, doc.applicationId, 'documents', 'Document Approved by HR', `${doc.label} approved by HR.`, 'Anisha Rawat');
+    async (documentId) => {
+      const doc = documents.find((d) => d.id === documentId);
+      if (!doc) return;
+      await api.patchDocument(documentId, { hrApprovedAt: new Date().toISOString() });
+      await api.logActivity(doc.applicationId, 'documents', 'Document Approved by HR', `${doc.label} approved by HR.`, 'Anisha Rawat');
 
-        const app = draft.applications.find((a) => a.id === doc.applicationId);
-        if (app && app.status === APP_STATUS.HR_DOC_REVIEW && allDocsHrApproved(draft, doc.applicationId)) {
-          app.status = APP_STATUS.DOCS_VERIFIED;
-          app.docReviewRejectReason = null;
-          logActivity(draft, app.id, 'documents', 'Documents Approved by HR', 'All documents approved by HR. Offer preparation can proceed.', 'Anisha Rawat');
-          notify(draft, ROLES.TA, 'Documents approved by HR', `${app.personal.firstName} ${app.personal.lastName}'s documents are approved. Offer preparation is now available.`);
-        }
-      });
+      const app = applications.find((a) => a.id === doc.applicationId);
+      if (app && app.status === 'HR_DOC_REVIEW' && (await allDocsHrApproved(doc.applicationId))) {
+        await api.patchApplication(app.id, { status: 'DOCS_VERIFIED', docReviewRejectReason: null });
+        await api.logActivity(app.id, 'documents', 'Documents Approved by HR', 'All documents approved by HR. Offer preparation can proceed.', 'Anisha Rawat');
+        await api.notify('TA', 'Documents approved by HR', `${app.personal.firstName} ${app.personal.lastName}'s documents are approved. Offer preparation is now available.`);
+      }
+      await refreshAll();
     },
-    [mutate]
+    [documents, applications, allDocsHrApproved, refreshAll]
   );
 
   const rejectDocuments = useCallback(
-    (applicationId, reason) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.HR_DOC_REJECTED;
-        app.docReviewRejectReason = reason;
-        logActivity(draft, applicationId, 'documents', 'Documents Returned by HR', reason, 'Anisha Rawat');
-        notify(draft, ROLES.TA, 'Documents returned by HR', `${app.personal.firstName} ${app.personal.lastName}: ${reason}`);
-      });
+    async (applicationId, reason) => {
+      const app = applications.find((a) => a.id === applicationId);
+      if (!app) return;
+      await api.patchApplication(applicationId, { status: 'HR_DOC_REJECTED', docReviewRejectReason: reason });
+      await api.logActivity(applicationId, 'documents', 'Documents Returned by HR', reason, 'Anisha Rawat');
+      await api.notify('TA', 'Documents returned by HR', `${app.personal.firstName} ${app.personal.lastName}: ${reason}`);
+      await refreshAll();
     },
-    [mutate]
+    [applications, refreshAll]
   );
 
   /* ---------- offers ---------- */
   const saveOffer = useCallback(
-    (applicationId, payload, submitForApproval) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        let offer = draft.offers.find((o) => o.applicationId === applicationId);
-        if (!offer) {
-          draft.counters.offer += 1;
-          offer = {
-            id: makeOfferId(draft.counters.offer),
-            applicationId,
-            createdAt: new Date().toISOString(),
-            issuedAt: null,
-            decisionAt: null,
-          };
-          draft.offers.push(offer);
-        }
-        Object.assign(offer, payload);
-        if (submitForApproval) {
-          // The letter is prepared and emailed outside the app — this just records it.
-          offer.status = OFFER_STATUS.ISSUED;
-          offer.issuedAt = new Date().toISOString();
-          app.status = APP_STATUS.OFFER_ISSUED;
-          logActivity(draft, applicationId, 'offer', 'Offer Extended', 'TA recorded that the offer letter was sent to the candidate by email.', 'Himanshu Singh');
-          notify(draft, ROLES.CANDIDATE, 'You have an offer', `Your offer for ${offer.jobTitle} has been emailed to you.`);
-        } else {
-          offer.status = OFFER_STATUS.DRAFT;
-          app.status = APP_STATUS.OFFER_DRAFT;
-          logActivity(draft, applicationId, 'offer', 'Offer Draft Saved', 'TA saved a draft of the offer.', 'Himanshu Singh');
-        }
-      });
+    async (applicationId, payload, submitForApproval) => {
+      const existing = offers.find((o) => o.applicationId === applicationId);
+      const backendPayload = {
+        applicationId,
+        candidateName: payload.candidateName, jobTitle: payload.jobTitle, department: payload.department, location: payload.location,
+        joiningDate: payload.joiningDate, employmentType: payload.employmentType,
+        compensation: payload.compensation ? Number(payload.compensation) : null,
+        benefits: payload.benefits, reportingManager: payload.reportingManager, probationPeriod: payload.probationPeriod,
+        status: submitForApproval ? 'ISSUED' : 'DRAFT',
+        issuedAt: submitForApproval ? new Date().toISOString() : null,
+      };
+      if (existing) {
+        await api.patchOffer(existing.id, backendPayload);
+      } else {
+        await api.createOffer(backendPayload);
+      }
+      if (submitForApproval) {
+        await api.patchApplication(applicationId, { status: 'OFFER_ISSUED' });
+        await api.logActivity(applicationId, 'offer', 'Offer Extended', 'TA recorded that the offer letter was sent to the candidate by email.', 'Himanshu Singh');
+        await api.notify('CANDIDATE', 'You have an offer', `Your offer for ${payload.jobTitle} has been emailed to you.`, applicationId);
+      } else {
+        await api.patchApplication(applicationId, { status: 'OFFER_DRAFT' });
+        await api.logActivity(applicationId, 'offer', 'Offer Draft Saved', 'TA saved a draft of the offer.', 'Himanshu Singh');
+      }
+      await refreshAll();
     },
-    [mutate]
+    [offers, refreshAll]
   );
 
   const acceptOffer = useCallback(
-    (offerId) => {
-      mutate((draft) => {
-        const offer = draft.offers.find((o) => o.id === offerId);
-        if (!offer) return;
-        offer.status = OFFER_STATUS.ACCEPTED;
-        offer.decisionAt = new Date().toISOString();
-        const app = draft.applications.find((a) => a.id === offer.applicationId);
-        if (app) app.status = APP_STATUS.ONBOARDING_PENDING;
-        const role = app?.jobTitle || 'a role';
-        logActivity(draft, offer.applicationId, 'offer', 'Offer Accepted', 'Candidate accepted the offer.', 'Candidate');
-        // TA → HR handover: both sides are notified when the offer is accepted.
-        logActivity(draft, offer.applicationId, 'onboarding', 'Handed Over to HR', `${offer.candidateName} accepted the offer for ${role} — HR now owns onboarding.`, 'System');
-        notify(draft, ROLES.CANDIDATE, 'Almost there', 'Please fill in your onboarding details.');
-        notify(draft, ROLES.TA, 'Offer accepted', `${offer.candidateName} accepted the offer for ${role}. Handed over to HR for onboarding.`);
-        notify(draft, ROLES.HR, 'New onboarding handover', `${offer.candidateName} accepted their offer for ${role} — ready to start HR onboarding.`);
-      });
+    async (offerId) => {
+      const offer = offers.find((o) => o.id === offerId);
+      if (!offer) return;
+      const app = applications.find((a) => a.id === offer.applicationId);
+      const role = app?.jobTitle || 'a role';
+      await api.patchOffer(offerId, { status: 'ACCEPTED', decisionAt: new Date().toISOString() });
+      await api.patchApplication(offer.applicationId, { status: 'ONBOARDING_PENDING' });
+      await api.logActivity(offer.applicationId, 'offer', 'Offer Accepted', 'Candidate accepted the offer.', 'Candidate');
+      await api.logActivity(offer.applicationId, 'onboarding', 'Handed Over to HR', `${offer.candidateName} accepted the offer for ${role} — HR now owns onboarding.`, 'System');
+      await api.notify('CANDIDATE', 'Almost there', 'Please fill in your onboarding details.', offer.applicationId);
+      await api.notify('TA', 'Offer accepted', `${offer.candidateName} accepted the offer for ${role}. Handed over to HR for onboarding.`);
+      await api.notify('HR', 'New onboarding handover', `${offer.candidateName} accepted their offer for ${role} — ready to start HR onboarding.`);
+      await refreshAll();
     },
-    [mutate]
+    [offers, applications, refreshAll]
   );
 
-  /* ---------- TA confirms the candidate accepted the offer (they reply by email,
-     not in the app) — same effect as the candidate accepting it directly. ---------- */
+  /* TA confirms the candidate accepted the offer (they reply by email, not
+     in the app) — same effect as the candidate accepting it directly. */
   const confirmOfferAccepted = useCallback(
-    (offerId) => {
-      mutate((draft) => {
-        const offer = draft.offers.find((o) => o.id === offerId);
-        if (!offer || offer.status === OFFER_STATUS.ACCEPTED) return;
-        offer.status = OFFER_STATUS.ACCEPTED;
-        offer.decisionAt = new Date().toISOString();
-        const app = draft.applications.find((a) => a.id === offer.applicationId);
-        if (app) app.status = APP_STATUS.ONBOARDING_PENDING;
-        const role = app?.jobTitle || 'a role';
-        logActivity(draft, offer.applicationId, 'offer', 'Offer Acceptance Confirmed', `TA confirmed ${offer.candidateName} accepted the offer for ${role} (received by email).`, 'Himanshu Singh');
-        logActivity(draft, offer.applicationId, 'onboarding', 'Handed Over to HR', `${offer.candidateName} accepted the offer for ${role} — HR now owns onboarding.`, 'System');
-        notify(draft, ROLES.CANDIDATE, 'Onboarding started', 'Your acceptance is confirmed. Please fill in your onboarding details.');
-        notify(draft, ROLES.HR, 'New onboarding handover', `${offer.candidateName} accepted their offer for ${role} — ready to start HR onboarding.`);
-      });
+    async (offerId) => {
+      const offer = offers.find((o) => o.id === offerId);
+      if (!offer || offer.status === 'ACCEPTED') return;
+      const app = applications.find((a) => a.id === offer.applicationId);
+      const role = app?.jobTitle || 'a role';
+      await api.patchOffer(offerId, { status: 'ACCEPTED', decisionAt: new Date().toISOString() });
+      await api.patchApplication(offer.applicationId, { status: 'ONBOARDING_PENDING' });
+      await api.logActivity(offer.applicationId, 'offer', 'Offer Acceptance Confirmed', `TA confirmed ${offer.candidateName} accepted the offer for ${role} (received by email).`, 'Himanshu Singh');
+      await api.logActivity(offer.applicationId, 'onboarding', 'Handed Over to HR', `${offer.candidateName} accepted the offer for ${role} — HR now owns onboarding.`, 'System');
+      await api.notify('CANDIDATE', 'Onboarding started', 'Your acceptance is confirmed. Please fill in your onboarding details.', offer.applicationId);
+      await api.notify('HR', 'New onboarding handover', `${offer.candidateName} accepted their offer for ${role} — ready to start HR onboarding.`);
+      await refreshAll();
     },
-    [mutate]
+    [offers, applications, refreshAll]
   );
 
   const declineOffer = useCallback(
-    (offerId) => {
-      mutate((draft) => {
-        const offer = draft.offers.find((o) => o.id === offerId);
-        if (!offer) return;
-        offer.status = OFFER_STATUS.DECLINED;
-        offer.decisionAt = new Date().toISOString();
-        const app = draft.applications.find((a) => a.id === offer.applicationId);
-        if (app) app.status = APP_STATUS.OFFER_DECLINED;
-        logActivity(draft, offer.applicationId, 'offer', 'Offer Declined', 'Candidate declined the offer.', 'Candidate');
-        notify(draft, ROLES.HR, 'Offer declined', `${offer.candidateName} declined the offer.`);
-      });
+    async (offerId) => {
+      const offer = offers.find((o) => o.id === offerId);
+      if (!offer) return;
+      await api.patchOffer(offerId, { status: 'DECLINED', decisionAt: new Date().toISOString() });
+      await api.patchApplication(offer.applicationId, { status: 'OFFER_DECLINED' });
+      await api.logActivity(offer.applicationId, 'offer', 'Offer Declined', 'Candidate declined the offer.', 'Candidate');
+      await api.notify('HR', 'Offer declined', `${offer.candidateName} declined the offer.`);
+      await refreshAll();
     },
-    [mutate]
+    [offers, refreshAll]
   );
 
   /* ---------- onboarding forms + HR verification ---------- */
   const submitOnboardingForms = useCallback(
-    (applicationId, formData) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.onboarding = formData;
-        app.status = APP_STATUS.HR_VERIFICATION;
-        logActivity(draft, applicationId, 'onboarding', 'Onboarding Forms Submitted', 'Candidate submitted onboarding details.', 'Candidate');
-        notify(draft, ROLES.HR, 'Onboarding forms submitted', `${app.personal.firstName} ${app.personal.lastName} submitted onboarding details for verification.`);
-      });
+    async (applicationId, formData) => {
+      const app = applications.find((a) => a.id === applicationId);
+      if (!app) return;
+      await api.patchApplication(applicationId, { status: 'HR_VERIFICATION', onboardingFormData: JSON.stringify(formData) });
+      await api.logActivity(applicationId, 'onboarding', 'Onboarding Forms Submitted', 'Candidate submitted onboarding details.', 'Candidate');
+      await api.notify('HR', 'Onboarding forms submitted', `${app.personal.firstName} ${app.personal.lastName} submitted onboarding details for verification.`);
+      await refreshAll();
     },
-    [mutate]
+    [applications, refreshAll]
   );
 
+  // TEMPORARY: HR-only actions below — no HR app exists yet, so they're
+  // exposed on the TA screen as clearly-marked "as HR" actions that call the
+  // exact same backend endpoints a future HR app would use.
   const verifyOnboarding = useCallback(
-    (applicationId) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.JOINING_PENDING;
-        logActivity(draft, applicationId, 'onboarding', 'Onboarding Verified', 'HR verified the onboarding details.', 'Anisha Rawat');
-        notify(draft, ROLES.CANDIDATE, 'Onboarding verified', 'Your onboarding details have been verified. Joining is pending.');
-      });
+    async (applicationId) => {
+      await api.patchApplication(applicationId, { status: 'JOINING_PENDING' });
+      await api.logActivity(applicationId, 'onboarding', 'Onboarding Verified', 'HR verified the onboarding details.', 'Anisha Rawat');
+      await api.notify('CANDIDATE', 'Onboarding verified', 'Your onboarding details have been verified. Joining is pending.', applicationId);
+      await refreshAll();
     },
-    [mutate]
+    [refreshAll]
   );
 
   const rejectOnboarding = useCallback(
-    (applicationId, reason) => {
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.HR_VERIFICATION_REJECTED;
-        app.onboardingRejectReason = reason;
-        logActivity(draft, applicationId, 'onboarding', 'Onboarding Returned by HR', reason, 'Anisha Rawat');
-        notify(draft, ROLES.CANDIDATE, 'Onboarding details returned', reason);
-      });
+    async (applicationId, reason) => {
+      await api.patchApplication(applicationId, { status: 'HR_VERIFICATION_REJECTED', onboardingRejectReason: reason });
+      await api.logActivity(applicationId, 'onboarding', 'Onboarding Returned by HR', reason, 'Anisha Rawat');
+      await api.notify('CANDIDATE', 'Onboarding details returned', reason, applicationId);
+      await refreshAll();
     },
-    [mutate]
+    [refreshAll]
   );
 
   const completeJoining = useCallback(
-    (applicationId, teamRole) => {
-      const employeeId = makeEmployeeId((state.counters?.employee || 0) + 1);
-      const role = (teamRole || '').trim();
-      mutate((draft) => {
-        const app = draft.applications.find((a) => a.id === applicationId);
-        if (!app) return;
-        app.status = APP_STATUS.EMPLOYEE;
-        draft.counters.employee += 1;
-        const offer = draft.offers.find((o) => o.applicationId === applicationId);
-        draft.employees.push({
-          id: employeeId,
-          applicationId,
-          name: `${app.personal.firstName} ${app.personal.lastName}`,
-          position: app.jobTitle,
-          department: offer?.department || '—',
-          teamRole: role || null,
-          joiningDate: offer?.joiningDate || null,
-          createdAt: new Date().toISOString(),
-        });
-        const joined = role
-          ? `HR marked joining as completed and assigned the ${role} team role.`
-          : 'HR marked joining as completed.';
-        logActivity(draft, applicationId, 'onboarding', 'Joining Completed', joined, 'Anisha Rawat');
-        logActivity(draft, applicationId, 'onboarding', 'Employee Created', `Employee record ${employeeId} created.`, 'System');
-        notify(draft, ROLES.CANDIDATE, 'Welcome aboard', `Your employee ID is ${employeeId}.`);
-      });
-      return employeeId;
+    async (applicationId, teamRole) => {
+      const created = await api.completeJoining({ applicationId, teamRole });
+      await refreshAll();
+      return created.employeeId;
     },
-    [mutate, state.counters]
+    [refreshAll]
   );
 
-  /* ---------- HR: assign a team role to an employee ---------- */
   const assignEmployeeRole = useCallback(
-    (employeeId, teamRole) => {
+    async (employeeId, teamRole) => {
       const clean = (teamRole || '').trim();
-      mutate((draft) => {
-        const emp = draft.employees.find((e) => e.id === employeeId);
-        if (!emp) return;
-        const previous = emp.teamRole || null;
-        emp.teamRole = clean || null;
-        const desc = clean
-          ? `${emp.name} assigned to ${clean}${previous && previous !== clean ? ` (was ${previous})` : ''}.`
-          : `${emp.name}'s team role was cleared.`;
-        logActivity(draft, emp.applicationId, 'onboarding', 'Team Role Assigned', desc, 'Anisha Rawat');
-      });
+      const emp = employees.find((e) => e.id === employeeId);
+      if (!emp) return;
+      const previous = emp.teamRole || null;
+      await api.patchEmployee(employeeId, { teamRole: clean || null });
+      const desc = clean
+        ? `${emp.name} assigned to ${clean}${previous && previous !== clean ? ` (was ${previous})` : ''}.`
+        : `${emp.name}'s team role was cleared.`;
+      await api.logActivity(emp.applicationId, 'onboarding', 'Team Role Assigned', desc, 'Anisha Rawat');
+      await refreshAll();
     },
-    [mutate]
+    [employees, refreshAll]
   );
 
   const markNotificationsRead = useCallback(
-    (roleTarget) => {
-      mutate((draft) => {
-        draft.notifications.forEach((n) => {
-          if (n.role === roleTarget) n.read = true;
-        });
-      });
+    async (roleTarget) => {
+      await api.markNotificationsRead(roleTarget);
+      await refreshAll();
     },
-    [mutate]
+    [refreshAll]
   );
 
   const createJob = useCallback(
-    (payload) => {
-      const jobSeq = (state.counters?.job || 1000) + 1;
-      const job = {
-        id: `JOB-${jobSeq}`,
-        title: payload.title,
+    async (payload) => {
+      const created = await api.createJob({
+        jobTitle: payload.title,
+        jobDescription: payload.description,
         department: payload.department,
         location: payload.location,
-        workMode: payload.workMode,
-        employmentType: payload.employmentType,
-        experience: payload.experience,
-        deadline: payload.deadline,
-        description: payload.description,
-        responsibilities: payload.responsibilities || [],
-        requiredSkills: payload.requiredSkills || [],
-        qualifications: payload.qualifications || [],
-        preferredSkills: payload.preferredSkills || [],
-        benefits: payload.benefits || [],
-        custom: true,
-      };
-      mutate((draft) => {
-        draft.counters.job = jobSeq;
-        if (!draft.jobs) draft.jobs = [];
-        draft.jobs.unshift({ ...job });
-        draft.activities.unshift({
-          id: uid('act'),
-          applicationId: null,
-          type: 'application',
-          title: 'Job Created',
-          description: `${job.title} (${job.id}) opened in ${job.department}.`,
-          actor: 'Himanshu Singh',
-          at: new Date().toISOString(),
-        });
+        requiredSkills: (payload.requiredSkills || []).join(', '),
       });
-      return job;
+      await refreshAll();
+      return mapJob(created);
     },
-    [mutate, state.counters]
+    [refreshAll]
   );
 
-  const resetDemo = useCallback(() => {
-    setData(buildSeed());
-  }, [setData]);
-
-  // Guided demo: fresh seed with no candidate application yet, so the walk-through
-  // can start from "apply for a job".
-  const startGuidedDemo = useCallback(() => {
-    const fresh = buildSeed();
-    fresh.myApplicationId = null;
-    setData(fresh);
-  }, [setData]);
-
   /* ---------- selectors ---------- */
-  const selectors = useMemo(() => {
-    const apps = state.applications || [];
-    const allJobs = [...(state.jobs || []), ...JOBS];
-    return {
-      jobs: allJobs,
-      getJob: (id) => allJobs.find((j) => j.id === id) || null,
-      getApplication: (id) => apps.find((a) => a.id === id) || null,
-      getApplicationByCandidate: (candidateId) => apps.find((a) => a.candidateId === candidateId) || null,
-      interviewsFor: (appId) =>
-        (state.interviews || []).filter((i) => i.applicationId === appId).sort((a, b) => a.round - b.round),
-      emailsFor: (appId) => (state.emails || []).filter((m) => m.applicationId === appId),
-      documentsFor: (appId) => (state.documents || []).filter((d) => d.applicationId === appId),
-      offerFor: (appId) => (state.offers || []).find((o) => o.applicationId === appId) || null,
-      offerById: (offerId) => (state.offers || []).find((o) => o.id === offerId) || null,
-      employeeFor: (appId) => (state.employees || []).find((e) => e.applicationId === appId) || null,
-      activitiesFor: (appId) => (state.activities || []).filter((a) => a.applicationId === appId),
-      notificationsFor: (roleTarget) => (state.notifications || []).filter((n) => n.role === roleTarget),
-    };
-  }, [state]);
+  const selectors = useMemo(
+    () => ({
+      jobs,
+      getJob: (id) => jobs.find((j) => j.id === id) || null,
+      getApplication: (id) => applications.find((a) => a.id === id) || null,
+      getApplicationByCandidate: (candidateId) => applications.find((a) => a.candidateId === candidateId) || null,
+      interviewsFor: (appId) => interviews.filter((i) => i.applicationId === appId).sort((a, b) => a.round - b.round),
+      documentsFor: (appId) => documents.filter((d) => d.applicationId === appId),
+      offerFor: (appId) => offers.find((o) => o.applicationId === appId) || null,
+      offerById: (offerId) => offers.find((o) => o.id === offerId) || null,
+      employeeFor: (appId) => employees.find((e) => e.applicationId === appId) || null,
+      activitiesFor: (appId) => activities.filter((a) => a.applicationId === appId),
+      notificationsFor: (roleTarget) => notifications.filter((n) => n.role === roleTarget),
+      companies,
+      states,
+      allCities: [...new Set(cities.map((c) => c.name))].sort(),
+      citiesForState: (stateCode) => cities.filter((c) => c.stateCode === stateCode).map((c) => c.name),
+    }),
+    [jobs, applications, documents, interviews, offers, employees, activities, notifications, companies, states, cities]
+  );
+
+  // `data.*` — kept as a flat bag for the pages that read `data.applications`,
+  // `data.offers` etc directly rather than through a selector.
+  const data = useMemo(
+    () => ({ applications, documents, interviews, offers, employees, activities, notifications, myApplicationId }),
+    [applications, documents, interviews, offers, employees, activities, notifications, myApplicationId]
+  );
 
   const value = useMemo(
     () => ({
-      role,
-      setRole,
-      taIdentity,
-      setTaIdentity,
-      isTAHead: isTAHead(taIdentity),
-      data: state,
+      role, setRole, taIdentity, setTaIdentity, isTAHead: isTAHead(taIdentity),
+      loaded,
+      data,
       ...selectors,
-      submitApplication,
-      updateApplication,
-      resubmitApplication,
-      startReview,
-      approveApplication,
-      returnApplication,
-      rejectApplication,
-      assignApplicationToTA,
-      scheduleInterview,
-      recordInterviewResult,
-      advanceToDocuments,
-      uploadDocument,
-      verifyDocument,
-      rejectDocument,
-      waiveDocument,
-      acceptWaivedReason,
-      rejectWaivedReason,
-      approveDocument,
-      rejectDocuments,
-      saveOffer,
-      acceptOffer,
-      confirmOfferAccepted,
-      declineOffer,
-      submitOnboardingForms,
-      verifyOnboarding,
-      rejectOnboarding,
-      completeJoining,
-      assignEmployeeRole,
-      createJob,
-      markNotificationsRead,
-      resetDemo,
-      startGuidedDemo,
+      submitApplication, resubmitApplication,
+      startReview, approveApplication, returnApplication, rejectApplication, assignApplicationToTA,
+      scheduleInterview, recordInterviewResult, advanceToDocuments,
+      uploadDocument, verifyDocument, rejectDocument, waiveDocument, acceptWaivedReason, rejectWaivedReason,
+      approveDocument, rejectDocuments,
+      saveOffer, acceptOffer, confirmOfferAccepted, declineOffer,
+      submitOnboardingForms, verifyOnboarding, rejectOnboarding, completeJoining, assignEmployeeRole,
+      createJob, markNotificationsRead,
+      refresh: refreshAll,
     }),
     [
-      role,
-      setRole,
-      taIdentity,
-      setTaIdentity,
-      state,
-      selectors,
-      createJob,
-      submitApplication,
-      updateApplication,
-      resubmitApplication,
-      startReview,
-      approveApplication,
-      returnApplication,
-      rejectApplication,
-      assignApplicationToTA,
-      scheduleInterview,
-      recordInterviewResult,
-      advanceToDocuments,
-      uploadDocument,
-      verifyDocument,
-      rejectDocument,
-      waiveDocument,
-      acceptWaivedReason,
-      rejectWaivedReason,
-      approveDocument,
-      rejectDocuments,
-      saveOffer,
-      acceptOffer,
-      confirmOfferAccepted,
-      declineOffer,
-      submitOnboardingForms,
-      verifyOnboarding,
-      rejectOnboarding,
-      completeJoining,
-      assignEmployeeRole,
-      markNotificationsRead,
-      resetDemo,
-      startGuidedDemo,
+      role, setRole, taIdentity, setTaIdentity, loaded, data, selectors,
+      submitApplication, resubmitApplication,
+      startReview, approveApplication, returnApplication, rejectApplication, assignApplicationToTA,
+      scheduleInterview, recordInterviewResult, advanceToDocuments,
+      uploadDocument, verifyDocument, rejectDocument, waiveDocument, acceptWaivedReason, rejectWaivedReason,
+      approveDocument, rejectDocuments,
+      saveOffer, acceptOffer, confirmOfferAccepted, declineOffer,
+      submitOnboardingForms, verifyOnboarding, rejectOnboarding, completeJoining, assignEmployeeRole,
+      createJob, markNotificationsRead, refreshAll,
     ]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
-}
-
-function structuredCloneSafe(obj) {
-  if (typeof structuredClone === 'function') return structuredClone(obj);
-  return JSON.parse(JSON.stringify(obj));
 }
 
 export function useApp() {

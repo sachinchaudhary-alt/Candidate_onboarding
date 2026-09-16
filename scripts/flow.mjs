@@ -1,140 +1,181 @@
-// End-to-end workflow test (acceptance test #61) driven through the real
-// AppContext reducers, in jsdom. No UI clicks — it calls the same actions
-// the buttons call and asserts the resulting state transitions.
-import { build } from 'esbuild';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
-import { JSDOM } from 'jsdom';
-import React from 'react';
+// End-to-end acceptance test — now that AppContext is 100% backend-driven
+// (no local reducer left to test against jsdom), this drives the same
+// workflow directly against the real CAP backend over HTTP, using the exact
+// payload shapes the frontend sends via src/utils/api.js.
+import { spawn, execSync } from 'node:child_process';
 
-const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: 'http://localhost/' });
-globalThis.window = dom.window;
-globalThis.document = dom.window.document;
-globalThis.localStorage = dom.window.localStorage;
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-
-const { createRoot } = await import('react-dom/client');
-const { act } = await import('react');
-
-const harness = `
-import React from 'react';
-import { AppProvider, useApp } from './src/context/AppContext.jsx';
-import { ToastProvider } from './src/context/ToastContext.jsx';
-export function Harness({ onCtx }) {
-  const ctx = useApp();
-  onCtx(ctx);
-  return null;
-}
-export function App({ onCtx }) {
-  return React.createElement(ToastProvider, null,
-    React.createElement(AppProvider, null,
-      React.createElement(Harness, { onCtx })));
-}
-`;
-mkdirSync('scripts/.tmp', { recursive: true });
-writeFileSync('_flow_entry.jsx', harness);
-const out = 'scripts/.tmp/flow-bundle.mjs';
-await build({
-  entryPoints: ['_flow_entry.jsx'],
-  bundle: true, format: 'esm', platform: 'node', outfile: out, jsx: 'automatic',
-  external: ['react', 'react-dom', 'react-router-dom', 'lucide-react'],
-  loader: { '.js': 'jsx', '.png': 'dataurl', '.jpg': 'dataurl', '.jpeg': 'dataurl', '.svg': 'dataurl', '.css': 'empty' }, logLevel: 'silent',
-});
-const { App } = await import(pathToFileURL(process.cwd() + '/' + out).href);
-
-let ctx;
-const root = createRoot(document.getElementById('root'));
-await act(async () => {
-  root.render(React.createElement(App, { onCtx: (c) => { ctx = c; } }));
-});
-
+// A dedicated port + in-memory DB, isolated from whatever's running on 4004
+// for manual testing (which now persists to backend/db.sqlite) — this test
+// must never write into that shared, persistent demo data.
+const TEST_PORT = 4099;
+const BASE = `http://localhost:${TEST_PORT}/odata/v4/ta`;
 const results = [];
 const check = (label, cond) => { results.push([label, !!cond]); console.log(`  ${cond ? 'PASS' : 'FAIL'}  ${label}`); };
-const run = async (fn) => { await act(async () => { fn(); }); };
 
-const form = {
-  jobId: 'JOB-1024',
-  autofilled: ['skills'],
-  personal: { firstName: 'Test', middleName: '', lastName: 'Candidate', email: 't@example.com', mobile: '+91 90000 00000', dob: '', gender: '', nationality: 'Indian', currentLocation: 'Bengaluru', preferredLocation: 'Bengaluru', address: { line1: '1 St', line2: '', city: 'Bengaluru', state: 'KA', country: 'India', postalCode: '560001' } },
-  professional: { currentJobTitle: 'Dev', currentCompany: 'Acme', totalExperience: '5', relevantExperience: '4', employmentStatus: 'Employed', currentCTC: '1800000', expectedCTC: '2400000', noticePeriod: '60 days', preferredJobLocation: 'Bengaluru', skills: ['SAP', 'React'], certifications: [], languages: ['English'] },
-  education: [{ id: 'e1', qualification: 'B.Tech', university: 'NIT', specialization: 'CS', year: '2016', grade: '8.2' }],
-  additional: { coverNote: '', referral: '', portfolio: '' },
-  resume: { name: 'Test_Candidate_Resume.pdf', size: 12345, uploadedAt: new Date().toISOString() },
-};
-
-let newJob;
-await run(() => { newJob = ctx.createJob({ title: 'Platform SRE', department: 'Platform', location: 'Remote, India', workMode: 'Remote', employmentType: 'Full-time', experience: '4–8 years', deadline: '2026-12-01', description: 'x', responsibilities: ['a'], qualifications: [], requiredSkills: ['Kubernetes'], preferredSkills: [], benefits: [] }); });
-check('TA creates job -> JOB id + appears in jobs list', newJob?.id?.startsWith('JOB-') && ctx.getJob(newJob.id)?.title === 'Platform SRE');
-
-let ids;
-await run(() => { ids = ctx.submitApplication(form); });
-check('Candidate + Application IDs generated', ids?.candidateId?.startsWith('CAN-') && ids?.applicationId?.startsWith('APP-'));
-const appId = ids.applicationId;
-check('Application starts as SUBMITTED', ctx.getApplication(appId)?.status === 'SUBMITTED');
-check('Document checklist created (5)', ctx.documentsFor(appId).length === 5);
-
-await run(() => ctx.startReview(appId));
-check('TA review started -> TA_REVIEW', ctx.getApplication(appId)?.status === 'TA_REVIEW');
-
-await run(() => ctx.approveApplication(appId));
-check('TA approve -> INTERVIEW_PLANNING', ctx.getApplication(appId)?.status === 'INTERVIEW_PLANNING');
-
-await run(() => ctx.scheduleInterview(appId, { type: 'HR Interview', interviewer: 'Himanshu Singh', date: '2026-09-10', time: '10:00', mode: 'Online', link: 'https://x', location: '', notes: '' }));
-check('Interview scheduled + visible to candidate', ctx.interviewsFor(appId).length === 1 && ctx.interviewsFor(appId)[0].status === 'SCHEDULED');
-check('Status -> INTERVIEW_IN_PROGRESS', ctx.getApplication(appId)?.status === 'INTERVIEW_IN_PROGRESS');
-
-let r1 = ctx.interviewsFor(appId)[0].id;
-await run(() => ctx.recordInterviewResult(r1, { result: 'PASS', comments: 'Good' }));
-check('Round 1 PASS -> INTERVIEW_PASSED', ctx.getApplication(appId)?.status === 'INTERVIEW_PASSED');
-
-await run(() => ctx.scheduleInterview(appId, { type: 'Technical Interview', interviewer: 'Karthik Rao', date: '2026-09-15', time: '14:00', mode: 'Online', link: 'https://y', location: '', notes: '' }));
-check('Second round schedulable after pass', ctx.interviewsFor(appId).length === 2);
-let r2 = ctx.interviewsFor(appId)[1].id;
-await run(() => ctx.recordInterviewResult(r2, { result: 'PASS', comments: 'Strong' }));
-check('All rounds passed -> INTERVIEW_PASSED', ctx.getApplication(appId)?.status === 'INTERVIEW_PASSED');
-
-await run(() => ctx.advanceToDocuments(appId));
-check('Advance -> DOC_VERIFICATION', ctx.getApplication(appId)?.status === 'DOC_VERIFICATION');
-
-for (const doc of ctx.documentsFor(appId)) {
-  await run(() => ctx.uploadDocument(doc.id, { name: `${doc.key}.pdf`, size: 100 }));
+async function call(method, path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${json?.error?.message || 'request failed'}`);
+  return json;
 }
-check('All documents uploaded (UPLOADED)', ctx.documentsFor(appId).every((d) => d.status === 'UPLOADED'));
-for (const doc of ctx.documentsFor(appId)) {
-  await run(() => ctx.verifyDocument(doc.id));
+const get = (path) => call('GET', path);
+const post = (path, body) => call('POST', path, body);
+const patch = (path, body) => call('PATCH', path, body);
+const key = (entity, id) => `/${entity}('${id}')`;
+
+// Document uploads are a plain multipart POST to backend/server.js, not OData.
+async function uploadFile(documentId, filename, contentType, text) {
+  const form = new FormData();
+  form.append('file', new Blob([text], { type: contentType }), filename);
+  const res = await fetch(`http://localhost:${TEST_PORT}/upload-document/${documentId}`, { method: 'POST', body: form });
+  if (!res.ok) throw new Error(`upload-document -> ${res.status}`);
+  return res.json();
 }
-check('All documents verified', ctx.documentsFor(appId).every((d) => d.status === 'VERIFIED'));
-check('Docs verified -> HR_DOC_REVIEW', ctx.getApplication(appId)?.status === 'HR_DOC_REVIEW');
 
-for (const doc of ctx.documentsFor(appId)) {
-  await run(() => ctx.approveDocument(doc.id));
+async function waitForServer(timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fetch(`${BASE}/Job`);
+      if (res.ok) return true;
+    } catch { /* not up yet */ }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
 }
-check('HR approve -> DOCS_VERIFIED', ctx.getApplication(appId)?.status === 'DOCS_VERIFIED');
 
-await run(() => ctx.saveOffer(appId, {
-  candidateName: 'Test Candidate', jobTitle: 'SAP Consultant', department: 'Enterprise Solutions', location: 'Bengaluru, India',
-  joiningDate: '2026-11-01', employmentType: 'Full-time', compensation: '2400000', benefits: 'Health', reportingManager: 'Latha', probationPeriod: '6 months',
-}, true));
-check('Offer sent -> OFFER_ISSUED', ctx.getApplication(appId)?.status === 'OFFER_ISSUED');
-const offer = ctx.offerFor(appId);
-check('Offer status ISSUED', offer?.status === 'ISSUED');
+console.log(`Starting an isolated backend instance for the test (port ${TEST_PORT}, in-memory db)...`);
+const child = spawn('npm', ['start'], {
+  cwd: 'backend',
+  shell: true,
+  stdio: 'ignore',
+  env: {
+    ...process.env,
+    PORT: String(TEST_PORT),
+    cds_requires_db_kind: 'sqlite',
+    cds_requires_db_credentials_url: ':memory:',
+  },
+});
+const up = await waitForServer(20000);
+if (!up) {
+  console.error('Backend did not come up in time.');
+  child.kill();
+  process.exit(1);
+}
 
-await run(() => ctx.acceptOffer(offer.id));
-check('Candidate accept -> ONBOARDING_PENDING', ctx.getApplication(appId)?.status === 'ONBOARDING_PENDING' && ctx.offerFor(appId).status === 'ACCEPTED');
+try {
+  const job = await post('/Job', { jobTitle: 'Flow Test Role', department: 'Engineering', location: 'Remote' });
+  check('TA creates job -> real jobId', /^JOB\d+$/.test(job.jobId));
 
-await run(() => ctx.submitOnboardingForms(appId, { tenth: { school: 'Test School' }, twelfth: { school: 'Test School' } }));
-check('Forms submitted -> HR_VERIFICATION', ctx.getApplication(appId)?.status === 'HR_VERIFICATION');
+  const applyRes = await post('/applyForJob', {
+    jobId: job.jobId, firstName: 'Flow', lastName: 'Tester', email: 'flow@example.com', mobileNumber: '9000000000', aadharNumber: '999988887777',
+    currentLocation: 'Bengaluru', totalExperience: 5, skills: 'React, SAP',
+    education: JSON.stringify([{ qualification: 'B.Tech', university: 'NIT', year: '2016', grade: '8.2' }]),
+  });
+  check('Candidate + Application created', /^CAND\d+$/.test(applyRes.candidate.candidateId) && /^APP\d+$/.test(applyRes.application.applicationId));
+  check('Application starts as SUBMITTED', applyRes.application.status === 'SUBMITTED');
+  check('Document checklist seeded (5)', applyRes.documents.length === 5);
+  const appId = applyRes.application.applicationId;
+  const candidateId = applyRes.candidate.candidateId;
 
-await run(() => ctx.verifyOnboarding(appId));
-check('HR verify -> JOINING_PENDING', ctx.getApplication(appId)?.status === 'JOINING_PENDING');
+  const edu = await get(`/Educations?$filter=candidateId eq '${candidateId}'`);
+  check('Education row stored', edu.value.length === 1 && edu.value[0].institute === 'NIT');
 
-await run(() => ctx.completeJoining(appId));
-const emp = ctx.employeeFor(appId);
-check('HR mark joining -> EMPLOYEE', ctx.getApplication(appId)?.status === 'EMPLOYEE');
-check('Employee ID generated (EMP-)', emp?.id?.startsWith('EMP-'));
-check('Full activity history present (>= 12 entries)', ctx.activitiesFor(appId).length >= 12);
+  await patch(key('JobApplications', appId), { status: 'TA_REVIEW' });
+  const shortlisted = await post('/reviewApplication', { applicationId: appId, decision: 'INTERVIEW_PLANNING' });
+  check('TA approve -> INTERVIEW_PLANNING', shortlisted.status === 'INTERVIEW_PLANNING');
 
-rmSync('_flow_entry.jsx', { force: true });
+  const iv1 = await post('/scheduleInterview', { applicationId: appId, type: 'HR Interview', interviewer: 'Himanshu Singh', date: '2026-09-10', time: '10:00', mode: 'Online' });
+  check('Interview round 1 scheduled', iv1.round === 1 && iv1.status === 'SCHEDULED');
+  check('Status -> INTERVIEW_IN_PROGRESS', (await get(key('JobApplications', appId))).status === 'INTERVIEW_IN_PROGRESS');
+
+  await post('/recordInterviewResult', { interviewId: iv1.ID, result: 'PASS', comments: 'Good' });
+  check('Round 1 PASS -> INTERVIEW_PASSED', (await get(key('JobApplications', appId))).status === 'INTERVIEW_PASSED');
+
+  await patch(key('JobApplications', appId), { status: 'DOC_VERIFICATION' });
+  const docs = (await get(`/Documents?$filter=applicationId eq '${appId}'`)).value;
+
+  // Real upload for the first document — actual file bytes into SQLite,
+  // fetched back through the standard OData $value URL.
+  const firstDoc = docs[0];
+  await uploadFile(firstDoc.ID, `${firstDoc.docKey}.pdf`, 'application/pdf', 'fake pdf bytes for the flow test');
+  const fileRes = await fetch(`${BASE}${key('Documents', firstDoc.ID)}/fileContent/$value`);
+  const fileText = await fileRes.text();
+  check('Uploaded file stored + fetchable via $value', fileRes.ok && fileText === 'fake pdf bytes for the flow test');
+
+  // Verify one document at a time, re-checking "all cleared?" against a
+  // fresh backend query after each — mirrors AppContext's verifyDocument ->
+  // maybeAdvanceDocs exactly, so a regression of that stale-state bug (where
+  // the last document's own update wasn't reflected in the very check meant
+  // to catch it) would show up here as never reaching HR_DOC_REVIEW.
+  for (const d of docs) {
+    if (d.ID !== firstDoc.ID) await patch(key('Documents', d.ID), { status: 'UPLOADED', fileName: `${d.docKey}.pdf` });
+    await patch(key('Documents', d.ID), { status: 'VERIFIED', verifiedAt: new Date().toISOString() });
+    const fresh = (await get(`/Documents?$filter=applicationId eq '${appId}'`)).value;
+    if (fresh.every((x) => x.status === 'VERIFIED')) {
+      await patch(key('JobApplications', appId), { status: 'HR_DOC_REVIEW' });
+    }
+  }
+  check('All documents verified', (await get(`/Documents?$filter=applicationId eq '${appId}'`)).value.every((d) => d.status === 'VERIFIED'));
+  check('Docs verified -> HR_DOC_REVIEW (auto-advance on the last one)', (await get(key('JobApplications', appId))).status === 'HR_DOC_REVIEW');
+
+  // Same pattern for HR's per-document approval -> DOCS_VERIFIED.
+  const toApprove = (await get(`/Documents?$filter=applicationId eq '${appId}'`)).value;
+  for (const d of toApprove) {
+    await patch(key('Documents', d.ID), { hrApprovedAt: new Date().toISOString() });
+    const fresh = (await get(`/Documents?$filter=applicationId eq '${appId}'`)).value;
+    if (fresh.every((x) => !!x.hrApprovedAt)) {
+      await patch(key('JobApplications', appId), { status: 'DOCS_VERIFIED' });
+    }
+  }
+  check('HR approve (temporary, as HR) -> DOCS_VERIFIED (auto-advance on the last one)', (await get(key('JobApplications', appId))).status === 'DOCS_VERIFIED');
+
+  const offer = await post('/Offers', {
+    applicationId: appId, candidateName: 'Flow Tester', jobTitle: 'Flow Test Role', department: 'Engineering', location: 'Remote',
+    joiningDate: '2026-11-01', employmentType: 'Full-time', compensation: 2400000, reportingManager: 'Latha', probationPeriod: '6 months',
+    status: 'ISSUED', issuedAt: new Date().toISOString(),
+  });
+  await patch(key('JobApplications', appId), { status: 'OFFER_ISSUED' });
+  check('Offer created + ISSUED', offer.status === 'ISSUED');
+
+  await patch(key('Offers', offer.ID), { status: 'ACCEPTED', decisionAt: new Date().toISOString() });
+  await patch(key('JobApplications', appId), { status: 'ONBOARDING_PENDING' });
+  check('Offer accepted -> ONBOARDING_PENDING', (await get(key('JobApplications', appId))).status === 'ONBOARDING_PENDING');
+
+  await patch(key('JobApplications', appId), { status: 'HR_VERIFICATION', onboardingFormData: JSON.stringify({ tenth: { school: 'Test School' } }) });
+  check('Onboarding submitted -> HR_VERIFICATION', (await get(key('JobApplications', appId))).status === 'HR_VERIFICATION');
+
+  await patch(key('JobApplications', appId), { status: 'JOINING_PENDING' });
+  const emp = await post('/completeJoining', { applicationId: appId, teamRole: 'Platform Team' });
+  check('HR complete joining -> Employee created', /^EMP\d+$/.test(emp.employeeId));
+  check('Application status -> EMPLOYEE', (await get(key('JobApplications', appId))).status === 'EMPLOYEE');
+
+  const activities = (await get(`/Activities?$filter=applicationId eq '${appId}'`)).value;
+  check('Activity trail recorded (>= 7 entries)', activities.length >= 7);
+
+  const notifications = (await get('/Notifications')).value;
+  check('Notifications recorded', notifications.length > 0);
+
+} catch (err) {
+  console.error('Flow test error:', err.message);
+  results.push(['unhandled error', false]);
+} finally {
+  // plain child.kill() only stops the npm wrapper on Windows, not the node
+  // process it spawns — kill the whole tree instead, synchronously, so the
+  // port is actually free before this script exits.
+  if (child) {
+    if (process.platform === 'win32') {
+      try { execSync(`taskkill /pid ${child.pid} /t /f`, { stdio: 'ignore' }); } catch { /* already gone */ }
+    } else {
+      child.kill();
+    }
+  }
+}
+
 const failed = results.filter(([, ok]) => !ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);

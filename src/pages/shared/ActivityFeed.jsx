@@ -66,8 +66,9 @@ export default function ActivityFeed({ base = '/hr', scope = 'hr' }) {
         .filter((a) => scopeTypes.includes(a.type))
         .map((a) => {
           const app = getApplication(a.applicationId);
-          return { ...a, candidate: app ? `${app.personal.firstName} ${app.personal.lastName}` : '' };
-        }),
+          return app ? { ...a, candidate: `${app.personal.firstName} ${app.personal.lastName}` } : null;
+        })
+        .filter(Boolean),
     [data.activities, scopeTypes, getApplication]
   );
 

@@ -40,7 +40,12 @@ export default function TAJobDetailPage() {
   );
   const breakdown = BREAKDOWN.map((b) => ({
     ...b,
-    value: applicants.filter((a) => a.status !== APP_STATUS.REJECTED && stageIndexForStatus(a.status) >= b.reach).length,
+    // "Hired" means an Employee record actually exists — not just "reached
+    // the offer stage or beyond" like the other (cumulative) stages below.
+    value: applicants.filter((a) => {
+      if (a.status === APP_STATUS.REJECTED) return false;
+      return b.label === 'Hired' ? a.status === APP_STATUS.EMPLOYEE : stageIndexForStatus(a.status) >= b.reach;
+    }).length,
   }));
 
   if (!job) {

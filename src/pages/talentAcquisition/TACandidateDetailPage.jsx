@@ -14,7 +14,6 @@ import AssignTAModal from '../../components/workflow/AssignTAModal.jsx';
 import { ConfirmDialog } from '../../components/common/Modal.jsx';
 import { useApp } from '../../context/AppContext.jsx';
 import { useToast } from '../../context/ToastContext.jsx';
-import { findJob } from '../../data/jobs.js';
 import {
   APP_STATUS,
   ROUND_STATUS,
@@ -54,11 +53,14 @@ export default function TACandidateDetailPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const {
-    getApplicationByCandidate, interviewsFor, documentsFor, offerFor, employeeFor, activitiesFor,
+    getApplicationByCandidate, getJob, interviewsFor, documentsFor, offerFor, employeeFor, activitiesFor,
     startReview, approveApplication, returnApplication, rejectApplication,
     scheduleInterview, recordInterviewResult, advanceToDocuments,
     verifyDocument, rejectDocument, saveOffer, confirmOfferAccepted, declineOffer,
     isTAHead, assignApplicationToTA, acceptWaivedReason, rejectWaivedReason,
+    // TEMPORARY: no HR app exists yet — these call the exact same backend
+    // endpoints a future HR app would, just triggered from the TA screen.
+    approveDocument, rejectDocuments, verifyOnboarding, rejectOnboarding, completeJoining,
   } = useApp();
 
   const app = getApplicationByCandidate(candidateId);
@@ -74,6 +76,12 @@ export default function TACandidateDetailPage() {
   const [pendingResult, setPendingResult] = useState(null);
   const [pendingOffer, setPendingOffer] = useState(null);
   const [pendingAssignTA, setPendingAssignTA] = useState(null);
+  // TEMPORARY (as HR) UI state — see note above on approveDocument etc.
+  const [hrApproveDocFor, setHrApproveDocFor] = useState(null);
+  const [hrReturnDocs, setHrReturnDocs] = useState(false);
+  const [hrVerifyOnboarding, setHrVerifyOnboarding] = useState(false);
+  const [hrReturnOnboarding, setHrReturnOnboarding] = useState(false);
+  const [hrCompleteJoining, setHrCompleteJoining] = useState(false);
   const [step, setStep] = useState(null); // wizard page; null = follow the live stage
   const [showAllAct, setShowAllAct] = useState(false);
   const [tab, setTab] = useState('overview'); // profile tile: overview | contact | experience | skills
@@ -108,7 +116,7 @@ export default function TACandidateDetailPage() {
   const name = `${app.personal.firstName} ${app.personal.lastName}`;
   const p = app.personal;
   const pr = app.professional;
-  const job = app.jobId ? findJob(app.jobId) : null;
+  const job = app.jobId ? getJob(app.jobId) : null;
   const interviews = interviewsFor(app.id);
   const documents = documentsFor(app.id);
   const offer = offerFor(app.id);
@@ -123,7 +131,16 @@ export default function TACandidateDetailPage() {
   const canVerifyDocs = [APP_STATUS.DOC_VERIFICATION, APP_STATUS.HR_DOC_REJECTED].includes(app.status);
   const showDocs = DOC_STAGES.includes(app.status);
 
-  const act = (fn, msg) => { fn(); toast.success(msg); };
+  // If fn() is blocked (not built in the backend yet), it throws after
+  // showing its own toast — so don't also claim success here.
+  const act = async (fn, msg) => {
+    try {
+      await fn();
+      toast.success(msg);
+    } catch (err) {
+      toast.error(err.message || 'Something went wrong — please try again.');
+    }
+  };
 
   // Workflow step states — pipeline index: 1 review, 2 interview, 3 documents, 4 offer.
   const cur = stageIdx;
@@ -401,7 +418,14 @@ export default function TACandidateDetailPage() {
                           <span className="ta-docrow__icon"><Icon name="FileText" size={16} /></span>
                           <div className="grow">
                             <div className="ta-cell-strong">{doc.label}{mandatory && <span className="cx-req" title="Mandatory"> *</span>}</div>
-                            <div className="ta-cell-sub">{doc.fileName || (doc.status === DOC_STATUS.WAIVED ? 'Not provided by candidate' : 'No file uploaded')}{doc.status === DOC_STATUS.REJECTED && doc.rejectionReason ? ` · ${doc.rejectionReason}` : ''}</div>
+                            <div className="ta-cell-sub">
+                              {doc.fileUrl ? (
+                                <a href={doc.fileUrl} target="_blank" rel="noreferrer" className="ta-link">{doc.fileName}</a>
+                              ) : (
+                                doc.status === DOC_STATUS.WAIVED ? 'Not provided by candidate' : 'No file uploaded'
+                              )}
+                              {doc.status === DOC_STATUS.REJECTED && doc.rejectionReason ? ` · ${doc.rejectionReason}` : ''}
+                            </div>
                             {doc.status === DOC_STATUS.WAIVED && doc.skipReason && (
                               <div className="ta-cell-sub" style={{ color: 'var(--tag-amber-fg)' }}>
                                 Candidate's reason: {doc.skipReason}
@@ -425,9 +449,25 @@ export default function TACandidateDetailPage() {
                               <button className="ta-iconbtn" title="Reject reason" onClick={() => setRejectReasonFor(doc)}><Icon name="X" size={15} /></button>
                             </span>
                           )}
+                          {app.status === APP_STATUS.HR_DOC_REVIEW && !doc.hrApprovedAt && (
+                            <span className="ta-rowactions" style={{ opacity: 1 }}>
+                              <Button variant="ghost" icon="ShieldCheck" onClick={() => setHrApproveDocFor(doc)}>Approve (as HR)</Button>
+                            </span>
+                          )}
+                          {doc.hrApprovedAt && <Tag tone="green">HR approved</Tag>}
                         </div>
                       );
                     })}
+                    {app.status === APP_STATUS.HR_DOC_REVIEW && (
+                      <div className="ta-note ta-note--warn" style={{ marginTop: 4 }}>
+                        <Icon name="ShieldAlert" size={15} />
+                        <span>
+                          No HR app exists yet — "Approve (as HR)" above and{' '}
+                          <button type="button" className="ta-link" onClick={() => setHrReturnDocs(true)}>Return to TA (as HR)</button>{' '}
+                          are temporary stand-ins that call the same backend endpoints a future HR app will use.
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )
               )}
@@ -451,10 +491,35 @@ export default function TACandidateDetailPage() {
                       <p className="ta-cell-sub" style={{ marginBottom: 12 }}>Documents are verified. Record the offer details once the letter has been sent.</p>
                     )}
                     {taHandedOver ? (
-                      <div className="ta-note ta-note--ok" style={{ marginTop: 14 }}>
-                        <Icon name="CheckCircle2" size={15} />
-                        <span>Offer accepted — handed over to HR. There's nothing further for TA to do on this candidate.</span>
-                      </div>
+                      <>
+                        <div className="ta-note ta-note--ok" style={{ marginTop: 14 }}>
+                          <Icon name="CheckCircle2" size={15} />
+                          <span>Offer accepted — handed over to HR.</span>
+                        </div>
+                        {app.status === APP_STATUS.HR_VERIFICATION_REJECTED && (
+                          <div className="ta-note ta-note--warn"><Icon name="RotateCcw" size={15} /> HR returned the onboarding details: {app.onboardingRejectReason}</div>
+                        )}
+                        {employee && (
+                          <div className="ta-note ta-note--ok"><Icon name="UserRoundCheck" size={15} /> Employee record created — ID {employee.id}{employee.teamRole ? ` · ${employee.teamRole}` : ''}.</div>
+                        )}
+                        {[APP_STATUS.HR_VERIFICATION, APP_STATUS.JOINING_PENDING].includes(app.status) && (
+                          <div className="ta-note ta-note--info" style={{ marginTop: 8 }}>
+                            <Icon name="ShieldAlert" size={15} />
+                            <span>No HR app exists yet — the actions below are a temporary stand-in that call the same backend endpoints a future HR app will use.</span>
+                          </div>
+                        )}
+                        <div className="ta-btnrow" style={{ marginTop: 10 }}>
+                          {app.status === APP_STATUS.HR_VERIFICATION && (
+                            <>
+                              <Button icon="ShieldCheck" onClick={() => setHrVerifyOnboarding(true)}>Verify onboarding (as HR)</Button>
+                              <Button variant="ghost" icon="RotateCcw" onClick={() => setHrReturnOnboarding(true)}>Return onboarding (as HR)</Button>
+                            </>
+                          )}
+                          {app.status === APP_STATUS.JOINING_PENDING && (
+                            <Button icon="UserRoundCheck" onClick={() => setHrCompleteJoining(true)}>Complete joining (as HR)</Button>
+                          )}
+                        </div>
+                      </>
                     ) : (
                       <div className="ta-btnrow" style={{ marginTop: offer ? 14 : 0 }}>
                         {CAN_OFFER.includes(app.status) && (
@@ -533,7 +598,7 @@ export default function TACandidateDetailPage() {
       <ReasonModal
         open={!!rejectDoc} onClose={() => setRejectDoc(null)}
         title={`Reject ${rejectDoc?.label || 'document'}`} label="What is wrong with it?" confirmLabel="Reject document" tone="danger"
-        onSubmit={(reason) => { rejectDocument(rejectDoc.id, reason); setRejectDoc(null); toast.success('Document rejected — candidate notified.'); }}
+        onSubmit={(reason) => { act(() => rejectDocument(rejectDoc.id, reason), 'Document rejected — candidate notified.'); setRejectDoc(null); }}
       />
       <ScheduleInterviewModal
         open={modal === 'schedule'} onClose={() => setModal(null)} roundNumber={interviews.length + 1}
@@ -610,7 +675,7 @@ export default function TACandidateDetailPage() {
       <ReasonModal
         open={!!rejectReasonFor} onClose={() => setRejectReasonFor(null)}
         title={`Reject reason for ${rejectReasonFor?.label || 'document'}`} label="Why isn't this reason acceptable?" confirmLabel="Reject reason" tone="danger"
-        onSubmit={(note) => { rejectWaivedReason(rejectReasonFor.id, note); setRejectReasonFor(null); toast.success('Reason rejected — candidate must upload the document.'); }}
+        onSubmit={(note) => { act(() => rejectWaivedReason(rejectReasonFor.id, note), 'Reason rejected — candidate must upload the document.'); setRejectReasonFor(null); }}
       />
       <ConfirmDialog
         open={!!pendingSchedule}
@@ -643,6 +708,43 @@ export default function TACandidateDetailPage() {
         message="This TA becomes the owner of this candidate going forward."
         confirmLabel="Assign"
         onConfirm={() => { act(() => assignApplicationToTA(app.id, pendingAssignTA), `Assigned to ${pendingAssignTA}.`); setPendingAssignTA(null); }}
+      />
+
+      {/* TEMPORARY (as HR) — no HR app exists yet, so these are stand-in
+          triggers on the TA screen for the real HR-only backend endpoints. */}
+      <ConfirmDialog
+        open={!!hrApproveDocFor}
+        onClose={() => setHrApproveDocFor(null)}
+        title={`Approve ${hrApproveDocFor?.label || 'this document'} as HR?`}
+        message="Temporary stand-in for HR's sign-off — calls the same backend endpoint a future HR app will use."
+        confirmLabel="Approve (as HR)"
+        onConfirm={() => { act(() => approveDocument(hrApproveDocFor.id), `${hrApproveDocFor.label} approved by HR.`); setHrApproveDocFor(null); }}
+      />
+      <ReasonModal
+        open={hrReturnDocs} onClose={() => setHrReturnDocs(false)}
+        title="Return documents to TA (as HR)" label="Reason" confirmLabel="Return to TA" tone="danger"
+        onSubmit={(reason) => { act(() => rejectDocuments(app.id, reason), 'Documents returned to TA.'); setHrReturnDocs(false); }}
+      />
+      <ConfirmDialog
+        open={hrVerifyOnboarding}
+        onClose={() => setHrVerifyOnboarding(false)}
+        title="Verify onboarding details as HR?"
+        message="Temporary stand-in for HR's sign-off — moves the candidate to joining pending."
+        confirmLabel="Verify (as HR)"
+        onConfirm={() => { act(() => verifyOnboarding(app.id), 'Onboarding verified — joining pending.'); setHrVerifyOnboarding(false); }}
+      />
+      <ReasonModal
+        open={hrReturnOnboarding} onClose={() => setHrReturnOnboarding(false)}
+        title="Return onboarding details (as HR)" label="Reason" confirmLabel="Return to candidate" tone="danger"
+        onSubmit={(reason) => { act(() => rejectOnboarding(app.id, reason), 'Onboarding details returned to candidate.'); setHrReturnOnboarding(false); }}
+      />
+      <ConfirmDialog
+        open={hrCompleteJoining}
+        onClose={() => setHrCompleteJoining(false)}
+        title="Complete joining as HR?"
+        message="Temporary stand-in for HR's sign-off — generates the employee record."
+        confirmLabel="Complete joining (as HR)"
+        onConfirm={() => { act(() => completeJoining(app.id, null), 'Joining completed — employee record created.'); setHrCompleteJoining(false); }}
       />
     </>
   );

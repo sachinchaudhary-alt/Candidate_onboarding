@@ -6,6 +6,7 @@ import Card from '../../components/ta/Card.jsx';
 import Tag from '../../components/ta/Tag.jsx';
 import EmptyState from '../../components/ta/EmptyState.jsx';
 import { Field, Input } from '../../components/common/Field.jsx';
+import { SearchableSelect } from '../../components/ta/Field.jsx';
 import { ConfirmDialog } from '../../components/common/Modal.jsx';
 import { useApp } from '../../context/AppContext.jsx';
 import { useToast } from '../../context/ToastContext.jsx';
@@ -113,7 +114,7 @@ function DocUpload({ label, onFile }) {
         ref={ref} type="file" accept=".pdf,.jpg,.jpeg,.png" hidden
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) onFile({ name: f.name, size: f.size, type: f.type, uploadedAt: new Date().toISOString() });
+          if (f) onFile(f);
         }}
         aria-label={`Upload ${label}`}
       />
@@ -131,8 +132,12 @@ const emptyOnboardingForm = () => ({
 /* Onboarding details form — 10th / 12th / address / emergency contact.
    Pre-fills from a previous submission so a rejected candidate doesn't retype everything. */
 function OnboardingForm({ initial, onSubmit }) {
+  const { states, citiesForState, allCities } = useApp();
   const [f, setF] = useState(() => ({ ...emptyOnboardingForm(), ...initial }));
   const setSection = (section, patch) => setF((prev) => ({ ...prev, [section]: { ...prev[section], ...patch } }));
+
+  const stateCode = states.find((s) => s.name === f.address.state)?.code;
+  const cityOptions = stateCode ? citiesForState(stateCode) : allCities;
 
   return (
     <>
@@ -156,8 +161,22 @@ function OnboardingForm({ initial, onSubmit }) {
       <div className="form-grid" style={{ marginBottom: 16 }}>
         <Field label="Address line 1" full><Input value={f.address.line1} onChange={(e) => setSection('address', { line1: e.target.value })} /></Field>
         <Field label="Address line 2" full><Input value={f.address.line2} onChange={(e) => setSection('address', { line2: e.target.value })} /></Field>
-        <Field label="City"><Input value={f.address.city} onChange={(e) => setSection('address', { city: e.target.value })} /></Field>
-        <Field label="State"><Input value={f.address.state} onChange={(e) => setSection('address', { state: e.target.value })} /></Field>
+        <Field label="State">
+          <SearchableSelect
+            value={f.address.state}
+            options={states.map((s) => s.name)}
+            placeholder="Search state..."
+            onChange={(v) => setSection('address', { state: v, city: '' })}
+          />
+        </Field>
+        <Field label="City">
+          <SearchableSelect
+            value={f.address.city}
+            options={cityOptions}
+            placeholder="Search city..."
+            onChange={(v) => setSection('address', { city: v })}
+          />
+        </Field>
         <Field label="Postal code"><Input value={f.address.postalCode} onChange={(e) => setSection('address', { postalCode: e.target.value })} /></Field>
       </div>
 
@@ -222,10 +241,14 @@ export default function MyApplicationPage() {
   const pendingDocs = documents.filter((d) => [DOC_STATUS.PENDING, DOC_STATUS.REJECTED].includes(d.status)).length;
   const hint = nextStep(status, pendingDocs);
 
-  const submitReason = () => {
+  const submitReason = async () => {
     if (!reasonText.trim()) return;
-    waiveDocument(reasonFor, reasonText.trim());
-    toast.success('Reason submitted — our team will review it.');
+    try {
+      await waiveDocument(reasonFor, reasonText.trim());
+      toast.success('Reason submitted — our team will review it.');
+    } catch (err) {
+      toast.error(err.message || 'Something went wrong — please try again.');
+    }
     setReasonFor(null);
     setReasonText('');
   };
@@ -375,7 +398,13 @@ export default function MyApplicationPage() {
                             <div className="ta-cell-strong">
                               {doc.label}{mandatory && <span className="cx-req" title="Mandatory"> *</span>}
                             </div>
-                            <div className="ta-cell-sub">{doc.fileName || (doc.status === DOC_STATUS.WAIVED ? 'Not provided' : 'No file uploaded')}</div>
+                            <div className="ta-cell-sub">
+                              {doc.fileUrl ? (
+                                <a href={doc.fileUrl} target="_blank" rel="noreferrer" className="ta-link">{doc.fileName}</a>
+                              ) : (
+                                doc.status === DOC_STATUS.WAIVED ? 'Not provided' : 'No file uploaded'
+                              )}
+                            </div>
                             {doc.status === DOC_STATUS.REJECTED && doc.rejectionReason && (
                               <div className="ta-cell-sub" style={{ color: 'var(--tag-red-fg)' }}>Rejected: {doc.rejectionReason}</div>
                             )}
@@ -404,7 +433,14 @@ export default function MyApplicationPage() {
                           <Tag tone={toneMap[m.tone] || 'grey'}>{m.label}</Tag>
                           {canAct && reasonFor !== doc.id && (
                             <span className="cx-docacts">
-                              <DocUpload label={doc.label} onFile={(f) => { uploadDocument(doc.id, f); toast.success(`${doc.label} uploaded — now under verification.`); }} />
+                              <DocUpload label={doc.label} onFile={async (f) => {
+                                try {
+                                  await uploadDocument(doc.id, f);
+                                  toast.success(`${doc.label} uploaded — now under verification.`);
+                                } catch (err) {
+                                  toast.error(err.message || 'Something went wrong — please try again.');
+                                }
+                              }} />
                               {!mandatory && doc.status !== DOC_STATUS.WAIVED && (
                                 <button className="ta-btn ta-btn--ghost ta-btn--sm" onClick={() => { setReasonFor(doc.id); setReasonText(''); }}>
                                   Can't provide
@@ -468,7 +504,14 @@ export default function MyApplicationPage() {
               )}
               <OnboardingForm
                 initial={app.onboarding}
-                onSubmit={(formData) => { submitOnboardingForms(app.id, formData); toast.success('Onboarding details submitted for HR verification.'); }}
+                onSubmit={async (formData) => {
+                  try {
+                    await submitOnboardingForms(app.id, formData);
+                    toast.success('Onboarding details submitted for HR verification.');
+                  } catch (err) {
+                    toast.error(err.message || 'Something went wrong — please try again.');
+                  }
+                }}
               />
             </Card>
           )}
@@ -500,7 +543,15 @@ export default function MyApplicationPage() {
         title="Resubmit your application?"
         message="This sends your application back to Talent Acquisition for another review."
         confirmLabel="Resubmit"
-        onConfirm={() => { resubmitApplication(app.id); toast.success('Application resubmitted for review.'); setConfirmResubmit(false); }}
+        onConfirm={async () => {
+          try {
+            await resubmitApplication(app.id);
+            toast.success('Application resubmitted for review.');
+          } catch (err) {
+            toast.error(err.message || 'Something went wrong — please try again.');
+          }
+          setConfirmResubmit(false);
+        }}
       />
     </div>
   );

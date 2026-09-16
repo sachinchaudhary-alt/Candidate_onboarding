@@ -1,18 +1,20 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import Icon from '../../components/common/Icon.jsx';
 import Button from '../../components/ta/Button.jsx';
 import Card from '../../components/ta/Card.jsx';
-import { Field, FieldGrid, Input, Select, Textarea } from '../../components/ta/Field.jsx';
+import { Field, FieldGrid, Input, Select, SearchableSelect, Textarea } from '../../components/ta/Field.jsx';
 import { useApp } from '../../context/AppContext.jsx';
 import { useToast } from '../../context/ToastContext.jsx';
-import { simulateResumeParse, ANALYZE_STEPS } from '../../utils/resumeParser.js';
+import { ANALYZE_STEPS } from '../../utils/resumeParser.js';
 import { loadJSON, saveJSON } from '../../hooks/useLocalStorage.js';
 import { uid } from '../../utils/ids.js';
 
 const DRAFT_KEY = 'talentflow.apply.draft.v2';
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const phoneRe = /^[+]?[\d\s()-]{8,}$/;
+const phoneRe = /^\d{10}$/;
+const aadharRe = /^\d{12}$/;
+const digitsOnly = (v) => v.replace(/\D/g, '');
 const EXP_OPTIONS = ['Fresher', '0–2 years', '2–5 years', '5–8 years', '8+ years'];
 const NOTICE_OPTIONS = ['Immediate', '15 Days', '30 Days', '60 Days', '90 Days'];
 const SOURCE_OPTIONS = ['Job Board', 'Referral', 'Social', 'Direct'];
@@ -33,6 +35,7 @@ function blankForm(jobId) {
   return {
     jobId: jobId || null,
     firstName: '', lastName: '', email: '', phone: '', currentLocation: '', experience: '',
+    aadharNumber: '',
     currentCompany: '', currentJobTitle: '', highestQualification: '', noticePeriod: '', expectedSalary: '',
     coverNote: '', portfolio: '', source: '',
     resume: null, skills: [], autofilled: [],
@@ -51,9 +54,15 @@ export default function ApplyPage() {
   const jobId = paramJobId || sp.get('job') || null;
 
   const navigate = useNavigate();
-  const { submitApplication, getJob } = useApp();
+  const { submitApplication, getJob, companies, allCities } = useApp();
   const toast = useToast();
   const job = jobId ? getJob(jobId) : null;
+
+  // Applying needs a real backend job to attach to — general (job-less)
+  // applications aren't something the backend supports.
+  useEffect(() => {
+    if (!jobId) navigate('/candidate/jobs', { replace: true });
+  }, [jobId, navigate]);
 
   const [form, setForm] = useState(() => {
     const d = loadJSON(DRAFT_KEY, null);
@@ -74,8 +83,9 @@ export default function ApplyPage() {
   const validateField = (k, v) => {
     let msg = '';
     if (REQUIRED.includes(k) && !String(v).trim()) msg = `${LABELS[k]} is required.`;
-    else if (k === 'email' && v && !emailRe.test(v)) msg = 'Please enter a valid email address.';
-    else if (k === 'phone' && v && !phoneRe.test(v)) msg = 'Please enter a valid phone number.';
+    else if (k === 'email' && v && !emailRe.test(v)) msg = 'Please enter a valid email address (must include @).';
+    else if (k === 'phone' && v && !phoneRe.test(v)) msg = 'Enter a valid 10-digit mobile number.';
+    else if (k === 'aadharNumber' && !aadharRe.test(v)) msg = 'Enter a valid 12-digit Aadhaar number.';
     setErrors((e) => ({ ...e, [k]: msg || undefined }));
     return !msg;
   };
@@ -89,17 +99,18 @@ export default function ApplyPage() {
     REQUIRED.forEach((k) => {
       if (!String(form[k]).trim()) e[k] = `${LABELS[k]} is required.`;
     });
-    if (form.email && !emailRe.test(form.email)) e.email = 'Please enter a valid email address.';
-    if (form.phone && !phoneRe.test(form.phone)) e.phone = 'Please enter a valid phone number.';
+    if (form.email && !emailRe.test(form.email)) e.email = 'Please enter a valid email address (must include @).';
+    if (!phoneRe.test(form.phone)) e.phone = 'Enter a valid 10-digit mobile number.';
+    if (!aadharRe.test(form.aadharNumber)) e.aadharNumber = 'Enter a valid 12-digit Aadhaar number.';
     if (!form.resume) e.resume = 'Please upload your resume (PDF, DOC or DOCX under 5 MB).';
     setErrors(e);
     return Object.keys(e).length === 0;
   };
 
-  const handleFile = (fileList) => {
+  const handleFile = async (fileList) => {
     const file = fileList?.[0];
     if (!file) return;
-    if (!/\.(pdf|docx?|)$/i.test(file.name) || file.size > 5 * 1024 * 1024) {
+    if (!/\.(pdf|docx?)$/i.test(file.name) || file.size > 5 * 1024 * 1024) {
       setErrors((e) => ({ ...e, resume: 'Please upload a PDF, DOC or DOCX file under 5 MB.' }));
       return;
     }
@@ -107,26 +118,50 @@ export default function ApplyPage() {
     setErrors((e) => ({ ...e, resume: undefined }));
     set({ resume: meta });
 
+    // Real parsing time varies with file size/network, so step through the
+    // "analyzing" animation on a timer and just hold on the last step until
+    // the actual response comes back, instead of a fixed-length fake delay.
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setAnalyzeIdx(0);
-    ANALYZE_STEPS.forEach((_, i) => timers.current.push(setTimeout(() => setAnalyzeIdx(i + 1), (i + 1) * 380)));
-    timers.current.push(
-      setTimeout(() => {
-        const p = simulateResumeParse(meta.name);
-        setForm((f) => ({
-          ...f,
-          firstName: p.firstName, lastName: p.lastName, email: p.email, phone: p.mobile,
-          currentLocation: p.currentLocation, experience: expBucket(p.totalExperience),
-          currentCompany: p.currentCompany, currentJobTitle: p.currentJobTitle,
-          highestQualification: p.education?.[0]?.qualification || f.highestQualification,
-          skills: [...p.skills],
-          autofilled: ['firstName', 'lastName', 'email', 'phone', 'currentLocation', 'experience', 'currentCompany', 'currentJobTitle', 'highestQualification'],
-        }));
-        setErrors({});
-        toast.success('Resume details extracted — review each field before submitting.');
-      }, ANALYZE_STEPS.length * 380 + 200)
-    );
+    const stepDelay = 350;
+    for (let i = 1; i < ANALYZE_STEPS.length; i++) {
+      timers.current.push(setTimeout(() => setAnalyzeIdx(i), i * stepDelay));
+    }
+
+    try {
+      const body = new FormData();
+      body.append('resume', file);
+      const res = await fetch('/parse-resume', { method: 'POST', body });
+      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error || 'Could not read this file');
+      const p = await res.json();
+
+      timers.current.forEach(clearTimeout);
+      setAnalyzeIdx(ANALYZE_STEPS.length);
+
+      const autofilled = [];
+      const patch = {};
+      if (p.firstName) { patch.firstName = p.firstName; autofilled.push('firstName'); }
+      if (p.lastName) { patch.lastName = p.lastName; autofilled.push('lastName'); }
+      if (p.email) { patch.email = p.email; autofilled.push('email'); }
+      if (p.mobile) { patch.phone = p.mobile; autofilled.push('phone'); }
+      if (p.currentLocation) { patch.currentLocation = p.currentLocation; autofilled.push('currentLocation'); }
+      if (p.totalExperience != null) { patch.experience = expBucket(p.totalExperience); autofilled.push('experience'); }
+      if (p.highestQualification) { patch.highestQualification = p.highestQualification; autofilled.push('highestQualification'); }
+      if (p.skills?.length) { patch.skills = p.skills; autofilled.push('skills'); }
+
+      setForm((f) => ({ ...f, ...patch, autofilled }));
+      setErrors({});
+      toast.success(
+        autofilled.length
+          ? `Extracted ${autofilled.length} field${autofilled.length === 1 ? '' : 's'} from your resume — review before submitting.`
+          : "Couldn't auto-detect details from this resume — please fill the form in below."
+      );
+    } catch (err) {
+      timers.current.forEach(clearTimeout);
+      setAnalyzeIdx(-1);
+      toast.error(err.message || 'Could not read this resume — please fill the form in below.');
+    }
   };
 
   const removeResume = () => {
@@ -147,7 +182,7 @@ export default function ApplyPage() {
       return;
     }
     setSubmitting(true);
-    setTimeout(() => {
+    setTimeout(async () => {
       const payload = {
         jobId: form.jobId,
         source: form.source || 'Direct',
@@ -155,6 +190,7 @@ export default function ApplyPage() {
         personal: {
           firstName: form.firstName, middleName: '', lastName: form.lastName,
           email: form.email, mobile: form.phone, dob: '', gender: '', nationality: '',
+          aadharNumber: form.aadharNumber,
           currentLocation: form.currentLocation, preferredLocation: form.currentLocation,
           address: { line1: '', line2: '', city: form.currentLocation, state: '', country: 'India', postalCode: '' },
         },
@@ -170,10 +206,14 @@ export default function ApplyPage() {
         additional: { coverNote: form.coverNote, referral: '', portfolio: form.portfolio },
         resume: form.resume,
       };
-      const result = submitApplication(payload);
-      saveJSON(DRAFT_KEY, null);
-      setSubmitting(false);
-      navigate('/candidate/application/success', { state: { ...result, jobTitle: job ? job.title : 'General Application' } });
+      try {
+        const result = await submitApplication(payload);
+        saveJSON(DRAFT_KEY, null);
+        navigate('/candidate/application/success', { state: { ...result, jobTitle: job ? job.title : 'General Application' } });
+      } catch (err) {
+        toast.error(err.message || 'Could not submit your application — please try again.');
+        setSubmitting(false);
+      }
     }, 900);
   };
 
@@ -279,14 +319,26 @@ export default function ApplyPage() {
                   <Input type="email" value={form.email} error={errors.email} onChange={(e) => setAndValidate('email', e.target.value)} onBlur={(e) => validateField('email', e.target.value)} />
                 </Field>
                 <Field label="Phone number" required error={errors.phone} extracted={isAuto('phone')}>
-                  <Input value={form.phone} error={errors.phone} onChange={(e) => setAndValidate('phone', e.target.value)} onBlur={(e) => validateField('phone', e.target.value)} />
+                  <Input value={form.phone} error={errors.phone} inputMode="numeric" maxLength={10} onChange={(e) => setAndValidate('phone', digitsOnly(e.target.value))} onBlur={(e) => validateField('phone', e.target.value)} />
                 </Field>
                 <Field label="Current location" required error={errors.currentLocation} extracted={isAuto('currentLocation')}>
-                  <Input value={form.currentLocation} error={errors.currentLocation} onChange={(e) => setAndValidate('currentLocation', e.target.value)} onBlur={(e) => validateField('currentLocation', e.target.value)} />
+                  <SearchableSelect
+                    value={form.currentLocation}
+                    error={errors.currentLocation}
+                    options={allCities}
+                    placeholder="Search city..."
+                    onChange={(v) => setAndValidate('currentLocation', v)}
+                    onBlur={(e) => validateField('currentLocation', e.target.value)}
+                  />
                 </Field>
                 <Field label="Total experience" required error={errors.experience} extracted={isAuto('experience')}>
                   <Select value={form.experience} error={errors.experience} placeholder="Select" options={EXP_OPTIONS} onChange={(e) => setAndValidate('experience', e.target.value)} />
                 </Field>
+                {job && (
+                  <Field label="Aadhaar number" required error={errors.aadharNumber} hint="12-digit number, used to match you if you've applied before">
+                    <Input value={form.aadharNumber} error={errors.aadharNumber} inputMode="numeric" maxLength={12} onChange={(e) => setAndValidate('aadharNumber', digitsOnly(e.target.value))} onBlur={(e) => validateField('aadharNumber', e.target.value)} />
+                  </Field>
+                )}
               </FieldGrid>
             </Card>
           </div>
@@ -299,7 +351,7 @@ export default function ApplyPage() {
             <Card>
               <FieldGrid>
                 <Field label="Current company" extracted={isAuto('currentCompany')}>
-                  <Input value={form.currentCompany} onChange={(e) => set({ currentCompany: e.target.value })} />
+                  <SearchableSelect value={form.currentCompany} onChange={(v) => set({ currentCompany: v })} options={companies} placeholder="Search company..." />
                 </Field>
                 <Field label="Current job title" extracted={isAuto('currentJobTitle')}>
                   <Input value={form.currentJobTitle} onChange={(e) => set({ currentJobTitle: e.target.value })} />

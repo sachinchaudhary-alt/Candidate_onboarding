@@ -178,7 +178,12 @@ export default function TADashboard() {
 
   const stageRows = STAGES.map((s) => ({
     ...s,
-    value: activeApps.filter((a) => stageIndexForStatus(a.status) >= s.reach).length,
+    // "Hired" means an Employee record actually exists — not just "reached
+    // the offer stage or beyond" like the other (cumulative) funnel stages,
+    // otherwise it counts candidates who are still mid-onboarding.
+    value: activeApps.filter((a) =>
+      s.key === 'hired' ? a.status === APP_STATUS.EMPLOYEE : stageIndexForStatus(a.status) >= s.reach
+    ).length,
   }));
   const busiest = stageRows.reduce((top, s) => (s.value > top.value ? s : top), stageRows[0]);
 

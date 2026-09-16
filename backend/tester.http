@@ -1,0 +1,67 @@
+@host = http://localhost:4004
+@service = /odata/v4/ta
+
+### Read service document
+GET {{host}}{{service}}/
+
+### CREATE Candidate (candidateId is auto-generated server-side)
+POST {{host}}{{service}}/Candidates
+Content-Type: application/json
+
+{
+  "firstName": "Jane",
+  "lastName": "Doe",
+  "email": "jane.doe@example.com",
+  "mobileNumber": "9999999999"
+}
+
+### READ Candidates (list)
+GET {{host}}{{service}}/Candidates
+
+### READ Candidate (single) - replace key with one returned above
+GET {{host}}{{service}}/Candidates('CAND00001')
+
+### UPDATE Candidate - replace key with one returned above
+PATCH {{host}}{{service}}/Candidates('CAND00002')
+Content-Type: application/json
+
+{
+  "currentCity": "Bangalore",
+  "totalExperience": 3.5
+}
+
+### DELETE Candidate - replace key with one returned above
+DELETE {{host}}{{service}}/Candidates('CAND00002')
+
+### CREATE Education
+POST {{host}}{{service}}/Educations
+Content-Type: application/json
+
+{
+  "candidateId": "CAND00001",
+  "qualification": "B.Tech",
+  "institute": "XYZ University",
+  "passingYear": 2020
+}
+
+### CREATE Document
+POST {{host}}{{service}}/Documents
+Content-Type: application/json
+
+{
+  "candidateId": "CAND00001",
+  "docType": "Resume",
+  "docName": "resume.pdf",
+  "fileUrl": "http://example.com/resume.pdf"
+}
+
+### CREATE Job
+POST {{host}}{{service}}/Job
+Content-Type: application/json
+
+{
+  "jobId": "JOB001",
+  "jobTitle": "Software Engineer",
+  "department": "Engineering",
+  "location": "Remote"
+}

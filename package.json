@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:backend": "vite build && node scripts/sync-app.mjs",
     "preview": "vite preview",
     "graph": "node scripts/graphify.mjs",
     "graph:open": "node scripts/graph-serve.mjs",

@@ -102,10 +102,14 @@ export default function TAInterviewsPage() {
         open={!!resultFor}
         onClose={() => setResultFor(null)}
         interview={resultFor}
-        onSave={(res) => {
-          recordInterviewResult(resultFor.id, res);
+        onSave={async (res) => {
+          try {
+            await recordInterviewResult(resultFor.id, res);
+            toast.success('Interview result saved.');
+          } catch (err) {
+            toast.error(err.message || 'Something went wrong — please try again.');
+          }
           setResultFor(null);
-          toast.success('Interview result saved.');
         }}
       />
     </div>

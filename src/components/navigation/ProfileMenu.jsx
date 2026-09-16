@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Icon from '../common/Icon.jsx';
-import { ConfirmDialog } from '../common/Modal.jsx';
 import { useApp } from '../../context/AppContext.jsx';
 import { ROLES, ROLE_META, DEMO_USERS } from '../../constants/roles.js';
 import { TA_TEAM } from '../../constants/taTeam.js';
@@ -19,9 +18,8 @@ const ROLE_TITLE = {
    to restart the demo. `links` adds portal-specific rows above the switcher. */
 export default function ProfileMenu({ role, links = [] }) {
   const navigate = useNavigate();
-  const { setRole, startGuidedDemo, taIdentity, setTaIdentity } = useApp();
+  const { setRole, taIdentity, setTaIdentity } = useApp();
   const [open, setOpen] = useState(false);
-  const [confirmRestart, setConfirmRestart] = useState(false);
   const ref = useRef(null);
   const isTA = role === ROLES.TA;
   const user = isTA
@@ -39,8 +37,7 @@ export default function ProfileMenu({ role, links = [] }) {
   const go = (to) => { setOpen(false); navigate(to); };
   const switchTo = (r) => { setOpen(false); setRole(r); navigate(ROLE_META[r].home); };
   const actAs = (name) => { setOpen(false); setTaIdentity(name); };
-  const restart = () => { setConfirmRestart(true); };
-  const confirmRestartNow = () => { setConfirmRestart(false); setOpen(false); startGuidedDemo(); setRole(ROLES.CANDIDATE); navigate('/candidate/jobs'); };
+  const startNewApplication = () => { setOpen(false); setRole(ROLES.CANDIDATE); navigate('/candidate/jobs'); };
   const signOut = () => { setOpen(false); setRole(null); navigate('/'); };
 
   return (
@@ -103,24 +100,14 @@ export default function ProfileMenu({ role, links = [] }) {
           ))}
 
           <div className="profilemenu__sep" />
-          <button type="button" className="profilemenu__item" onClick={restart} role="menuitem">
-            <Icon name="RotateCcw" size={15} /> Restart demo
+          <button type="button" className="profilemenu__item" onClick={startNewApplication} role="menuitem">
+            <Icon name="RotateCcw" size={15} /> Start a new application
           </button>
           <button type="button" className="profilemenu__item" onClick={signOut} role="menuitem">
             <Icon name="LogOut" size={15} /> Sign out
           </button>
         </div>
       )}
-
-      <ConfirmDialog
-        open={confirmRestart}
-        onClose={() => setConfirmRestart(false)}
-        onConfirm={confirmRestartNow}
-        title="Restart the demo?"
-        message="This wipes all current data and rebuilds a fresh guided-demo seed. This can't be undone."
-        confirmLabel="Restart demo"
-        tone="danger"
-      />
     </div>
   );
 }
