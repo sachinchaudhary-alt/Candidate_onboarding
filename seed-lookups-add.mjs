@@ -1,7 +1,7 @@
 // One-off incremental script: adds the newly-added SAP consultancy names
 // and the newly-added cities from seed-lookups.mjs to the live db without
 // duplicating rows that already exist. Run with the backend already
-// started: `node seed-lookups-add.mjs` (from backend/).
+// started: `node seed-lookups-add.mjs` (from the repo root).
 const BASE = 'http://localhost:4004/odata/v4/ta';
 
 async function post(body) {

@@ -1,5 +1,5 @@
 // Real email delivery via Gmail SMTP. Reads credentials from the environment
-// (backend/.env, see .env.example) — until GMAIL_USER/GMAIL_APP_PASSWORD are
+// (.env, see .env.example) — until GMAIL_USER/GMAIL_APP_PASSWORD are
 // set this just logs and skips, so the rest of the app works fine without
 // them. Drop the two vars in and emails start going out with no code change.
 const nodemailer = require('nodemailer');

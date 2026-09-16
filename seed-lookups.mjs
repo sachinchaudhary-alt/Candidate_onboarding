@@ -1,6 +1,6 @@
 // One-off script to populate LookupValues (companies, states, cities) for
 // the apply/onboarding form dropdowns. Run with the backend already started:
-// `node seed-lookups.mjs` (from backend/). Safe to re-run — it just adds
+// `node seed-lookups.mjs` (from the repo root). Safe to re-run — it just adds
 // more rows each time, so don't run it twice against the same persistent
 // db.sqlite without clearing it first.
 const BASE = 'http://localhost:4004/odata/v4/ta';

@@ -1,5 +1,5 @@
 // One-off script to populate a few realistic candidates for demoing the app.
-// Run with the backend already started: `node seed-demo.mjs` (from backend/).
+// Run with the backend already started: `node seed-demo.mjs` (from the repo root).
 // Data lives in the in-memory SQLite DB, so it's gone on the next restart —
 // re-run this any time you want it back.
 const BASE = 'http://localhost:4004/odata/v4/ta';

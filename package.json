@@ -1,28 +1,29 @@
 {
-  "name": "candidate-ta-onboarding-frontend",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "build:backend": "vite build && node scripts/sync-app.mjs",
-    "preview": "vite preview",
-    "graph": "node scripts/graphify.mjs",
-    "graph:open": "node scripts/graph-serve.mjs",
-    "test:routes": "node scripts/smoke.mjs",
-    "test:flow": "node scripts/flow.mjs",
-    "test": "node scripts/smoke.mjs && node scripts/flow.mjs"
-  },
+  "name": "TA_HR_Portal",
+  "version": "1.0.0",
   "dependencies": {
-    "lucide-react": "^0.408.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2"
+    "@sap/cds": "^10",
+    "dotenv": "^17.4.2",
+    "mammoth": "^1.12.3",
+    "multer": "^2.4.0",
+    "nodemailer": "^10.0.10",
+    "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.1",
-    "jsdom": "^25.0.1",
-    "vite": "^5.4.8"
+    "@cap-js/sqlite": "^3"
+  },
+  "scripts": {
+    "start": "cds-serve"
+  },
+  "private": true,
+  "cds": {
+    "requires": {
+      "db": {
+        "kind": "sqlite",
+        "credentials": {
+          "url": "db.sqlite"
+        }
+      }
+    }
   }
 }

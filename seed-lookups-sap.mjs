@@ -1,7 +1,7 @@
 // One-off incremental script: adds SAP services / consultancy companies
 // (India) to the existing COMPANY lookup rows without touching or
 // duplicating what's already seeded. Run with the backend already started:
-// `node seed-lookups-sap.mjs` (from backend/).
+// `node seed-lookups-sap.mjs` (from the repo root).
 const BASE = 'http://localhost:4004/odata/v4/ta';
 
 async function post(body) {

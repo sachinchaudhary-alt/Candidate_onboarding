@@ -21,7 +21,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const LOGO_DATA_URI = (() => {
   try {
-    const buf = fs.readFileSync(path.join(__dirname, '../../src/assets/ccentrik-logo.png'));
+    const buf = fs.readFileSync(path.join(__dirname, '../frontend/src/assets/ccentrik-logo.png'));
     return `data:image/png;base64,${buf.toString('base64')}`;
   } catch {
     return null;

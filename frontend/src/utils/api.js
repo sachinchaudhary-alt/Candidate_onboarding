@@ -1,4 +1,4 @@
-// Thin wrapper around the TAService OData endpoints exposed by backend/.
+// Thin wrapper around the TAService OData endpoints exposed by the CAP backend.
 const BASE = '/odata/v4/ta';
 
 async function request(method, path, body) {

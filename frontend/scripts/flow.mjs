@@ -5,7 +5,7 @@
 import { spawn, execSync } from 'node:child_process';
 
 // A dedicated port + in-memory DB, isolated from whatever's running on 4004
-// for manual testing (which now persists to backend/db.sqlite) — this test
+// for manual testing (which now persists to db.sqlite) — this test
 // must never write into that shared, persistent demo data.
 const TEST_PORT = 4099;
 const BASE = `http://localhost:${TEST_PORT}/odata/v4/ta`;
@@ -27,7 +27,7 @@ const post = (path, body) => call('POST', path, body);
 const patch = (path, body) => call('PATCH', path, body);
 const key = (entity, id) => `/${entity}('${id}')`;
 
-// Document uploads are a plain multipart POST to backend/server.js, not OData.
+// Document uploads are a plain multipart POST to server.js, not OData.
 async function uploadFile(documentId, filename, contentType, text) {
   const form = new FormData();
   form.append('file', new Blob([text], { type: contentType }), filename);
@@ -50,7 +50,7 @@ async function waitForServer(timeoutMs) {
 
 console.log(`Starting an isolated backend instance for the test (port ${TEST_PORT}, in-memory db)...`);
 const child = spawn('npm', ['start'], {
-  cwd: 'backend',
+  cwd: '..',
   shell: true,
   stdio: 'ignore',
   env: {
